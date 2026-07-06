@@ -1,0 +1,13 @@
+bin/
+obj/
+publish/
+.vs/
+*.user
+*.suo
+*.zip
+*.7z
+*.rar
+*.log
+E_Tempscript/
+CodexstarRelease/
+TestResults/

@@ -64,14 +64,14 @@ public partial class MainWindow : Window
 
     private static readonly CompletionSoundChoice[] CompletionSoundChoices =
     {
-        new(DefaultCompletionSoundId, "叮咚", ShortCompletionSoundRelativePath),
-        new("Switch.mp3", "Switch", @"Assets\Audio\Choices\Switch.mp3"),
-        new("光束.mp3", "光束", @"Assets\Audio\Choices\光束.mp3"),
-        new("塞尔达.mp3", "塞尔达", @"Assets\Audio\Choices\塞尔达.mp3"),
-        new("成就系统.mp3", "成就系统", @"Assets\Audio\Choices\成就系统.mp3"),
-        new("精灵尘.mp3", "精灵尘", @"Assets\Audio\Choices\精灵尘.mp3"),
-        new("闪讯.mp3", "闪讯", @"Assets\Audio\Choices\闪讯.mp3"),
-        new("马里奥.mp3", "马里奥", @"Assets\Audio\Choices\马里奥.mp3"),
+        new(DefaultCompletionSoundId, "叮咚", "Ding Dong", ShortCompletionSoundRelativePath),
+        new("Switch.mp3", "Switch", "Switch", @"Assets\Audio\Choices\Switch.mp3"),
+        new("光束.mp3", "光束", "Light Beam", @"Assets\Audio\Choices\光束.mp3"),
+        new("塞尔达.mp3", "塞尔达", "Zelda", @"Assets\Audio\Choices\塞尔达.mp3"),
+        new("成就系统.mp3", "成就系统", "Achievement", @"Assets\Audio\Choices\成就系统.mp3"),
+        new("精灵尘.mp3", "精灵尘", "Fairy Dust", @"Assets\Audio\Choices\精灵尘.mp3"),
+        new("闪讯.mp3", "闪讯", "Flash Ping", @"Assets\Audio\Choices\闪讯.mp3"),
+        new("马里奥.mp3", "马里奥", "Mario", @"Assets\Audio\Choices\马里奥.mp3"),
     };
 
     private static readonly Regex ThreadIdRegex = new(
@@ -125,6 +125,7 @@ public partial class MainWindow : Window
     private bool _dingDongEnabled = true;
     private string _completionSoundChoiceId = DefaultCompletionSoundId;
     private double _completionSoundThresholdMinutes = DefaultCompletionSoundThresholdMinutes;
+    private UiLanguage _uiLanguage = UiLanguage.Chinese;
     private bool _suppressCompletionSound;
     private bool _suppressSessionReplayDebug;
     private double _uiScalePercent = 100.0;
@@ -284,6 +285,40 @@ public partial class MainWindow : Window
         _windowContextMenu = null;
     }
 
+    private bool IsEnglishUi => _uiLanguage == UiLanguage.English;
+
+    private string Ui(string zh, string en)
+    {
+        return IsEnglishUi ? en : zh;
+    }
+
+    private string LanguageToggleText()
+    {
+        return IsEnglishUi ? "中文 UI" : "English UI";
+    }
+
+    private string GetCompletionSoundDisplayName(CompletionSoundChoice choice)
+    {
+        return IsEnglishUi ? choice.DisplayNameEn : choice.DisplayNameZh;
+    }
+
+    private void ToggleUiLanguage()
+    {
+        _uiLanguage = IsEnglishUi ? UiLanguage.Chinese : UiLanguage.English;
+        _collapsedSignature = null;
+        _expandedRenderSignature = null;
+        _collapsedWidth = double.NaN;
+        SaveUiSettings();
+
+        foreach (var card in _cards.Values.Distinct())
+        {
+            UpdateQuotaPinVisual(card);
+        }
+
+        DebugLog("ui_language_toggle", new { language = IsEnglishUi ? "en" : "zh" });
+        Render();
+    }
+
     private StackPanel CreateContextMenuStack(double scale, Action closeMenu, bool includeShow)
     {
         var stack = new StackPanel
@@ -324,24 +359,26 @@ public partial class MainWindow : Window
 
         if (includeShow)
         {
-            AddItem(IsVisible ? "隐藏" : "显示", IsVisible ? HideToTray : ShowFromTray);
-            AddItem("缩放", ShowScaleDialog);
-            AddItem("关闭", Close);
+            AddItem(IsVisible ? Ui("隐藏", "Hide") : Ui("显示", "Show"), IsVisible ? HideToTray : ShowFromTray);
+            AddItem(LanguageToggleText(), ToggleUiLanguage);
+            AddItem(Ui("缩放", "Scale"), ShowScaleDialog);
+            AddItem(Ui("关闭", "Close"), Close);
             AddFooter("Codexstar v1.0");
             return stack;
         }
 
-        AddItem(_isCollapsed ? "展开" : "折叠", ToggleCollapsed);
-        AddItem(_isQuotaPinned ? "松开额度面" : "固定额度面", PinQuotaPageFromMenu);
-        AddItem(_showQuotaPercentInRing ? "显示更新时间" : "显示百分比", ToggleQuotaDisplayMode);
-        AddItem("提示音", ShowCompletionSoundDialog);
-        AddItem("缩放", ShowScaleDialog);
+        AddItem(_isCollapsed ? Ui("展开", "Expand") : Ui("折叠", "Collapse"), ToggleCollapsed);
+        AddItem(_isQuotaPinned ? Ui("松开额度面", "Unpin Quota") : Ui("固定额度面", "Pin Quota"), PinQuotaPageFromMenu);
+        AddItem(_showQuotaPercentInRing ? Ui("显示更新时间", "Show Reset Time") : Ui("显示百分比", "Show Percent"), ToggleQuotaDisplayMode);
+        AddItem(Ui("提示音", "Sound"), ShowCompletionSoundDialog);
+        AddItem(LanguageToggleText(), ToggleUiLanguage);
+        AddItem(Ui("缩放", "Scale"), ShowScaleDialog);
         if (!includeShow)
         {
-            AddItem("隐藏", HideToTray);
+            AddItem(Ui("隐藏", "Hide"), HideToTray);
         }
 
-        AddItem("刷新", HardRefreshStatusLight);
+        AddItem(Ui("刷新", "Refresh"), HardRefreshStatusLight);
 
         stack.Children.Add(new Border
         {
@@ -350,7 +387,7 @@ public partial class MainWindow : Window
             Background = CreateFrozenBrush(Color.FromArgb(34, 219, 226, 242)),
             IsHitTestVisible = false,
         });
-        AddItem("关闭", Close);
+        AddItem(Ui("关闭", "Close"), Close);
         return stack;
     }
 
@@ -461,13 +498,13 @@ public partial class MainWindow : Window
             dialog.Close();
         }
 
-        buttons.Children.Add(CreateScaleDialogButton("取消", () => CloseDialog(false)));
-        buttons.Children.Add(CreateScaleDialogButton("确定", () => CloseDialog(true)));
+        buttons.Children.Add(CreateScaleDialogButton(Ui("取消", "Cancel"), () => CloseDialog(false)));
+        buttons.Children.Add(CreateScaleDialogButton(Ui("确定", "OK"), () => CloseDialog(true)));
 
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock
         {
-            Text = "缩放",
+            Text = Ui("缩放", "Scale"),
             FontFamily = FontForChinese(),
             FontWeight = FontWeights.SemiBold,
             FontSize = ScaleValue(14),
@@ -629,13 +666,13 @@ public partial class MainWindow : Window
         void RefreshSegmentButtons()
         {
             modeRow.Children.Clear();
-            offOption = SegmentButton("关闭", !enabledDraft, () =>
+            offOption = SegmentButton(Ui("关闭", "Off"), !enabledDraft, () =>
             {
                 enabledDraft = false;
                 RefreshSegmentButtons();
                 UpdateGate();
             });
-            onOption = SegmentButton("启动", enabledDraft, () =>
+            onOption = SegmentButton(Ui("启动", "On"), enabledDraft, () =>
             {
                 enabledDraft = true;
                 RefreshSegmentButtons();
@@ -651,7 +688,7 @@ public partial class MainWindow : Window
         var soundPopupContentWidth = ScaleValue(118);
         var selectedSoundText = new TextBlock
         {
-            Text = selectedChoiceDraft.DisplayName,
+            Text = GetCompletionSoundDisplayName(selectedChoiceDraft),
             FontFamily = FontForChinese(),
             FontWeight = FontWeights.SemiBold,
             FontSize = ScaleValue(13.0),
@@ -733,7 +770,7 @@ public partial class MainWindow : Window
             var hoverBrush = CreateContextMenuRowHoverBrush();
             var text = new TextBlock
             {
-                Text = choice.DisplayName,
+                Text = GetCompletionSoundDisplayName(choice),
                 Foreground = CreateFrozenBrush(isSelected ? Color.FromRgb(250, 252, 255) : Color.FromRgb(204, 211, 226)),
                 FontFamily = FontForChinese(),
                 FontSize = ScaleValue(13.4),
@@ -775,7 +812,7 @@ public partial class MainWindow : Window
             {
                 e.Handled = true;
                 selectedChoiceDraft = choice;
-                selectedSoundText.Text = choice.DisplayName;
+                selectedSoundText.Text = GetCompletionSoundDisplayName(choice);
                 soundPopup.IsOpen = false;
             };
             return row;
@@ -851,7 +888,7 @@ public partial class MainWindow : Window
         };
         thresholdRow.Children.Add(new TextBlock
         {
-            Text = "超过 ",
+            Text = Ui("超过 ", "Over "),
             FontFamily = FontForChinese(),
             FontSize = ScaleValue(12.4),
             FontWeight = FontWeights.Medium,
@@ -861,7 +898,7 @@ public partial class MainWindow : Window
         thresholdRow.Children.Add(thresholdInputShell);
         thresholdRow.Children.Add(new TextBlock
         {
-            Text = " 分钟的任务启动提示音",
+            Text = Ui(" 分钟的任务启动提示音", " minutes: play sound"),
             FontFamily = FontForChinese(),
             FontSize = ScaleValue(12.4),
             FontWeight = FontWeights.Medium,
@@ -870,9 +907,9 @@ public partial class MainWindow : Window
         });
 
         var gatedPanel = new StackPanel();
-        gatedPanel.Children.Add(LabelPlate("音效类型"));
+        gatedPanel.Children.Add(LabelPlate(Ui("音效类型", "Sound Type")));
         gatedPanel.Children.Add(soundSelector);
-        gatedPanel.Children.Add(LabelPlate("时间阈值"));
+        gatedPanel.Children.Add(LabelPlate(Ui("时间阈值", "Time Threshold")));
         gatedPanel.Children.Add(thresholdRow);
 
         void UpdateGate()
@@ -927,11 +964,11 @@ public partial class MainWindow : Window
             dialog.Close();
         }
 
-        buttons.Children.Add(CreateScaleDialogButton("取消", () => CloseDialog(false)));
-        buttons.Children.Add(CreateScaleDialogButton("确定", () => CloseDialog(true)));
+        buttons.Children.Add(CreateScaleDialogButton(Ui("取消", "Cancel"), () => CloseDialog(false)));
+        buttons.Children.Add(CreateScaleDialogButton(Ui("确定", "OK"), () => CloseDialog(true)));
 
         var stack = new StackPanel();
-        stack.Children.Add(LabelPlate("提示音效"));
+        stack.Children.Add(LabelPlate(Ui("提示音效", "Completion Sound")));
         stack.Children.Add(modeRow);
         stack.Children.Add(gatedPanel);
         stack.Children.Add(buttons);
@@ -1287,7 +1324,7 @@ public partial class MainWindow : Window
             Margin = ScaleThickness(5, 0, 0, 0),
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
-            ToolTip = CreateControlToolTip("试听"),
+            ToolTip = CreateControlToolTip(Ui("试听", "Preview")),
         };
         var glass = new Border
         {
@@ -2209,7 +2246,7 @@ public partial class MainWindow : Window
         {
             turnId = task.TurnId,
             seconds = Math.Round(duration.TotalSeconds, 1),
-            sound = GetCompletionSoundChoice(_completionSoundChoiceId).DisplayName,
+            sound = GetCompletionSoundDisplayName(GetCompletionSoundChoice(_completionSoundChoiceId)),
             path = soundPath
         });
 
@@ -2269,7 +2306,7 @@ public partial class MainWindow : Window
         var soundPath = IOPath.Combine(AppContext.BaseDirectory, choice.RelativePath);
         if (!File.Exists(soundPath))
         {
-            DebugLog("completion_sound_preview_missing", new { sound = choice.DisplayName, path = soundPath });
+            DebugLog("completion_sound_preview_missing", new { sound = GetCompletionSoundDisplayName(choice), path = soundPath });
             return;
         }
 
@@ -2458,6 +2495,17 @@ public partial class MainWindow : Window
             {
                 _completionSoundThresholdMinutes = Math.Clamp(thresholdMinutes, 0, 1440);
             }
+
+            if (TryGetProperty(doc.RootElement, out var languageProp, "uiLanguage", "language") &&
+                languageProp.ValueKind == JsonValueKind.String)
+            {
+                var language = languageProp.GetString();
+                _uiLanguage = language is not null &&
+                              (language.Equals("en", StringComparison.OrdinalIgnoreCase) ||
+                               language.Equals("english", StringComparison.OrdinalIgnoreCase))
+                    ? UiLanguage.English
+                    : UiLanguage.Chinese;
+            }
         }
         catch (Exception ex)
         {
@@ -2477,6 +2525,7 @@ public partial class MainWindow : Window
                 completionSoundEnabled = _dingDongEnabled,
                 completionSoundChoiceId = GetCompletionSoundChoice(_completionSoundChoiceId).Id,
                 completionSoundThresholdMinutes = Math.Round(_completionSoundThresholdMinutes, 2),
+                uiLanguage = IsEnglishUi ? "en" : "zh",
                 dingDongEnabled = _dingDongEnabled,
             });
             File.WriteAllText(_settingsPath, json, new System.Text.UTF8Encoding(false));
@@ -3544,7 +3593,7 @@ public partial class MainWindow : Window
             BorderBrush = CreateToggleButtonRimBrush(palette),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
-            ToolTip = CreateControlToolTip(collapsed ? "展开" : "折叠"),
+            ToolTip = CreateControlToolTip(collapsed ? Ui("展开", "Expand") : Ui("折叠", "Collapse")),
             Effect = new System.Windows.Media.Effects.DropShadowEffect
             {
                 Color = palette.Accent,
@@ -4288,7 +4337,7 @@ public partial class MainWindow : Window
             BorderBrush = CreateToggleButtonRimBrush(palette),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
-            ToolTip = CreateControlToolTip("固定"),
+            ToolTip = CreateControlToolTip(Ui("固定", "Pin")),
             Effect = new System.Windows.Media.Effects.DropShadowEffect
             {
                 Color = Color.FromRgb(168, 176, 190),
@@ -4560,7 +4609,7 @@ public partial class MainWindow : Window
         card.QuotaPinHead.Fill = stroke;
         card.QuotaPinNeedle.Stroke = stroke;
         card.QuotaPinButton.Opacity = _isQuotaPinned ? 1.0 : 0.78;
-        card.QuotaPinButton.ToolTip = CreateControlToolTip(_isQuotaPinned ? "松开" : "固定");
+        card.QuotaPinButton.ToolTip = CreateControlToolTip(_isQuotaPinned ? Ui("松开", "Unpin") : Ui("固定", "Pin"));
     }
 
     private void UpdateQuotaRing(ShapePath arc, TextBlock text, double? remainingPercent, string resetText)
@@ -4826,13 +4875,13 @@ public partial class MainWindow : Window
             UpdateIdleQuotaPanel(card);
         }
 
-        card.Title.Text = task.Title;
-        card.Message.Text = task.Status == TaskVisualStatus.Error ? task.Message : "";
+        card.Title.Text = GetDisplayTitle(task);
+        card.Message.Text = task.Status == TaskVisualStatus.Error ? GetDisplayMessage(task.Message) : "";
         card.Message.Visibility = task.Status == TaskVisualStatus.Error ? Visibility.Visible : Visibility.Collapsed;
         card.BadgeText.Text = GetStatusLabel(task);
         card.Duration.Text = FormatDuration(task);
         card.ToggleButton.Visibility = index == 1 ? Visibility.Visible : Visibility.Collapsed;
-        card.ToggleButton.ToolTip = CreateControlToolTip("折叠");
+        card.ToggleButton.ToolTip = CreateControlToolTip(Ui("折叠", "Collapse"));
         var visualChanged = !card.PaletteInitialized || previousStatus != task.Status;
         if (visualChanged)
         {
@@ -5445,7 +5494,9 @@ public partial class MainWindow : Window
             return title;
         }
 
-        return threadId == "manual" ? "手动状态" : $"任务 {threadId[..Math.Min(8, threadId.Length)]}";
+        return threadId == "manual"
+            ? Ui("手动状态", "Manual State")
+            : $"{Ui("任务", "Task")} {threadId[..Math.Min(8, threadId.Length)]}";
     }
 
     private static string NormalizeTitle(string title)
@@ -5606,29 +5657,70 @@ public partial class MainWindow : Window
         return $"{duration.Minutes:00}:{duration.Seconds:00}";
     }
 
-    private static string GetStatusLabel(TaskState task)
+    private string GetDisplayTitle(TaskState task)
+    {
+        if (task.Status == TaskVisualStatus.Idle || task.TurnId == "idle")
+        {
+            return Ui("额度页", "Quota");
+        }
+
+        if (task.ThreadId == "manual" && string.Equals(task.Title, "手动状态", StringComparison.Ordinal))
+        {
+            return Ui("手动状态", "Manual State");
+        }
+
+        if (IsEnglishUi && task.Title.StartsWith("任务 ", StringComparison.Ordinal))
+        {
+            return "Task " + task.Title["任务 ".Length..];
+        }
+
+        if (!IsEnglishUi && task.Title.StartsWith("Task ", StringComparison.Ordinal))
+        {
+            return "任务 " + task.Title["Task ".Length..];
+        }
+
+        return task.Title;
+    }
+
+    private string GetDisplayMessage(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return "";
+        }
+
+        return message switch
+        {
+            "已中止" => Ui("已中止", "Aborted"),
+            "待验收" => Ui("待验收", "Review"),
+            "目标模式" => Ui("目标模式", "Goal Mode"),
+            _ => message,
+        };
+    }
+
+    private string GetStatusLabel(TaskState task)
     {
         if (task.Goal is not null)
         {
             return task.Goal.Status switch
             {
-                "active" => "目标运行中",
-                "paused" => "目标暂停",
-                "blocked" => "目标受阻",
-                "usage_limited" => "用量受限",
-                "budget_limited" => "预算受限",
-                "complete" => "目标完成",
-                _ => "目标模式",
+                "active" => Ui("目标运行中", "Goal Running"),
+                "paused" => Ui("目标暂停", "Goal Paused"),
+                "blocked" => Ui("目标受阻", "Goal Blocked"),
+                "usage_limited" => Ui("用量受限", "Usage Limited"),
+                "budget_limited" => Ui("预算受限", "Budget Limited"),
+                "complete" => Ui("目标完成", "Goal Complete"),
+                _ => Ui("目标模式", "Goal Mode"),
             };
         }
 
         return task.Status switch
         {
-            TaskVisualStatus.Working => "工作中",
-            TaskVisualStatus.Done => "待验收",
-            TaskVisualStatus.Input => "待输入",
-            TaskVisualStatus.Error => "异常",
-            _ => "额度页"
+            TaskVisualStatus.Working => Ui("工作中", "Working"),
+            TaskVisualStatus.Done => Ui("待验收", "Review"),
+            TaskVisualStatus.Input => Ui("待输入", "Input"),
+            TaskVisualStatus.Error => Ui("异常", "Error"),
+            _ => Ui("额度页", "Quota")
         };
     }
 
@@ -6030,7 +6122,7 @@ public partial class MainWindow : Window
 
     private readonly record struct QuotaTooltipTargets(FrameworkElement Track, FrameworkElement Center);
 
-    private sealed record CompletionSoundChoice(string Id, string DisplayName, string RelativePath);
+    private sealed record CompletionSoundChoice(string Id, string DisplayNameZh, string DisplayNameEn, string RelativePath);
 
     private sealed record RateLimitSnapshot(
         double WeeklyRemainingPercent,
@@ -6170,6 +6262,12 @@ public partial class MainWindow : Window
         Done,
         Input,
         Error
+    }
+
+    private enum UiLanguage
+    {
+        Chinese,
+        English
     }
 
     private sealed record StatusPalette(Color Accent, Color Highlight, Color Surface)

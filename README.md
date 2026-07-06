@@ -90,13 +90,31 @@ Codexstar is a Windows floating status light for Codex. It keeps one thing visib
 
 Three card colors show working, review-pending, and needs-check states. The flowing pixel background makes the state readable at a glance, even when Codex is not the active window.
 
+<img src="docs/images/codexstar-desktop-expanded.png" alt="Codexstar desktop expanded mode" width="720">
+
+Each task gets its own card, with title, status, and duration kept in one quick glance.
+
+<img src="docs/images/codexstar-card-mode.png" alt="Codexstar card mode" width="420">
+
+Interrupted or failed tasks turn into a red card, so the one thing that needs attention does not blend into the rest.
+
+![Codexstar error card](docs/images/codexstar-error-card.png)
+
 ### 2. Collapsed Mode
 
 Cards can collapse into small bulbs, one bulb per task. It stays visible without fighting your focus, and this mode uses fewer resources.
 
+<img src="docs/images/codexstar-desktop-collapsed.png" alt="Codexstar desktop collapsed mode" width="720">
+
+In bulb mode, the card stack becomes a compact strip of color signals.
+
+![Codexstar bulb mode](docs/images/codexstar-bulb-mode.png)
+
 ### 3. Custom Completion Sounds
 
 Choose from 8 bundled completion sounds, preview them in the menu, and set a time threshold so short chats do not keep ringing.
+
+<img src="docs/images/codexstar-sound-settings.png" alt="Codexstar sound settings" width="300">
 
 ### 4. Quota Panel
 

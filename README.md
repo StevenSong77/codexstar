@@ -1,6 +1,10 @@
-# Codexstar / Codex闪星浮窗插件
+# Codexstar - Codex Status Light / Codex闪星浮窗插件
 
-Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工作，只负责一件小事：让你一眼知道 Codex 是在干活、等你验收，还是需要你回去看一眼。电脑托管时，人可以走开一点，焦虑少一点。
+Codexstar 是一个给 OpenAI Codex / Codex Desktop 使用的 Windows 浮窗状态灯。它不试图替你工作，只负责一件小事：让你一眼知道 Codex 是在干活、等你验收，还是需要你回去看一眼。电脑托管时，人可以走开一点，焦虑少一点。
+
+**Keywords:** OpenAI Codex, Codex Desktop, Codex task monitor, Codex status light, AI agent monitor, Windows floating widget, quota monitor, completion sound, tray app, WPF.
+
+**关键词：**Codex 状态灯、Codex 任务监控、AI Agent 任务提示、Windows 浮窗、额度监控、完成提示音、托盘工具。
 
 ## 功能
 
@@ -82,7 +86,7 @@ CODEX_STATUS_LIGHT_STATE_DIR
 
 ## English
 
-Codexstar is a Windows floating status light for Codex. It keeps one thing visible: whether Codex is working, waiting for review, or asking you to come back. Less tab-switching, fewer “is it still doing anything?” moments.
+Codexstar is a Windows floating status light and task monitor for OpenAI Codex / Codex Desktop. It keeps one thing visible: whether Codex is working, waiting for review, or asking you to come back. Less tab-switching, fewer “is it still doing anything?” moments.
 
 ## Features
 

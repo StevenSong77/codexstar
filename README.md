@@ -1,4 +1,4 @@
-# Codexstar / codex闪星浮窗插件
+# Codexstar / Codex闪星浮窗插件
 
 Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工作，只负责一件小事：让你一眼知道 Codex 是在干活、等你验收，还是需要你回去看一眼。电脑托管时，人可以走开一点，焦虑少一点。
 

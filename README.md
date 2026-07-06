@@ -123,7 +123,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-CodexstarRel
 - Codex Desktop should be installed under the same Windows account.
 - The release package is self-contained and does not require a separate .NET runtime.
 - The process name remains `CodexStatusLight.exe` for watcher and hook compatibility.
-- Bundled audio assets are listed in `CREDITS.md`; verify audio redistribution rights before using them in a stricter release context.
+- Bundled completion sounds come from Mixkit's public free sound effects library. See `CREDITS.md`.
 
 ## License
 

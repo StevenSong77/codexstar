@@ -2,9 +2,17 @@
 
 Codexstar includes local audio assets under `Assets/Audio`.
 
-Before publishing this repository publicly, verify that every bundled audio file is either user-created, public domain, or licensed for redistribution. If an audio file cannot be verified, replace it before public release.
+The bundled completion sounds were downloaded from the public free sound effects library at Mixkit:
 
-Current bundled files:
+- https://mixkit.co/free-sound-effects/
+- https://mixkit.co/license/
+- https://mixkit.co/terms/
+
+They are used in Codexstar as application notification sounds under the Mixkit Sound Effects Free License. Mixkit states that its free sound effects are royalty-free, do not require attribution, and can be used in personal and commercial projects.
+
+The Codexstar source code is MIT licensed, but the bundled audio files remain under Mixkit's applicable sound effects license and terms. Do not redistribute these audio files as a standalone stock sound library or claim them as original Codexstar audio.
+
+Bundled files:
 
 - `Assets/Audio/codex-done-short.wav`
 - `Assets/Audio/codex-done.wav`

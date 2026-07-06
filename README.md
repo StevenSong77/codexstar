@@ -2,31 +2,37 @@
 
 Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工作，只负责一件小事：让你一眼知道 Codex 是在干活、等你验收，还是需要你回去看一眼。电脑托管时，人可以走开一点，焦虑少一点。
 
-## 截图
-
-截图为演示状态，用来展示多任务并发、耗时计数和完成待验收标记。
-
-![Codexstar expanded task cards](docs/images/codexstar-expanded.png)
-
-展开模式：3 个任务正在跑，1 个任务已经完成，等你验收。
-
-![Codexstar collapsed bulbs](docs/images/codexstar-collapsed.png)
-
-折叠模式：任务卡片收成小灯泡，留个状态，不抢屏幕。
-
 ## 功能
 
 ### 1. 任务卡面模式
 
 三种卡面颜色分别代表：工作中、完成待验收、故障待检查。像素风流动背景会跟着状态变化，远远扫一眼就知道 Codex 现在有没有在干活，不用反复切回窗口确认它是不是在摸鱼。
 
+![Codexstar desktop expanded mode](docs/images/codexstar-desktop-expanded.png)
+
+卡面会贴在屏幕边缘显示，每个任务一张卡，标题、状态和运行时间都放在同一个视线范围里。
+
+![Codexstar card mode](docs/images/codexstar-card-mode.png)
+
+中止或异常状态会单独变成红色卡面，提醒你回去看一眼；不需要保留的异常卡，也可以手动点掉。
+
+![Codexstar error card](docs/images/codexstar-error-card.png)
+
 ### 2. 折叠模式
 
 任务卡片可以折叠成一排小灯泡，一个灯泡代表一个任务。写东西、看视频、打游戏时，它不会霸占注意力；资源占用也会更低。
 
+![Codexstar desktop collapsed mode](docs/images/codexstar-desktop-collapsed.png)
+
+小灯模式只保留颜色信号：有任务、已完成、异常，都不用打开 Codex 就能看出来。
+
+![Codexstar bulb mode](docs/images/codexstar-bulb-mode.png)
+
 ### 3. 自定义音效
 
 内置 8 款作者精选完成提示音，可在菜单里试听和选择。也可以设置“超过几分钟才响”，短对话不至于一直叮叮当当。
+
+![Codexstar sound settings](docs/images/codexstar-sound-settings.png)
 
 ### 4. 额度面
 
@@ -75,18 +81,6 @@ CODEX_STATUS_LIGHT_STATE_DIR
 ## English
 
 Codexstar is a Windows floating status light for Codex. It keeps one thing visible: whether Codex is working, waiting for review, or asking you to come back. Less tab-switching, fewer “is it still doing anything?” moments.
-
-## Screenshots
-
-Screenshots show simulated states for concurrent tasks, duration tracking, and review-pending indicators.
-
-![Codexstar expanded task cards](docs/images/codexstar-expanded.png)
-
-Expanded mode: three tasks are running, and one is waiting for review.
-
-![Codexstar collapsed bulbs](docs/images/codexstar-collapsed.png)
-
-Collapsed mode: task cards become compact status bulbs.
 
 ## Features
 

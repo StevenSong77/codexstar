@@ -38,6 +38,8 @@ Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工
 
 额度面可以固定，也可以松开。左边看周额度，右边看 5 小时额度；圆心内容可切换为刷新时间或剩余百分比。
 
+![Codexstar quota panel](docs/images/codexstar-quota-panel.png)
+
 ### 5. 自定义大小
 
 浮窗支持缩放。想低调，就缩小；想把电脑交给 Codex 后坐远一点看电视，就放大。它完成任务时，至少不会让你错过那一下。
@@ -99,6 +101,8 @@ Choose from 8 bundled completion sounds, preview them in the menu, and set a tim
 ### 4. Quota Panel
 
 Pin or unpin the quota panel any time. The left ring shows weekly quota, and the right ring shows the five-hour quota. The center text can show either refresh time or remaining percent.
+
+![Codexstar quota panel](docs/images/codexstar-quota-panel.png)
 
 ### 5. Custom Size
 

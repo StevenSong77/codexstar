@@ -8,11 +8,11 @@ Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工
 
 三种卡面颜色分别代表：工作中、完成待验收、故障待检查。像素风流动背景会跟着状态变化，远远扫一眼就知道 Codex 现在有没有在干活，不用反复切回窗口确认它是不是在摸鱼。
 
-![Codexstar desktop expanded mode](docs/images/codexstar-desktop-expanded.png)
+<img src="docs/images/codexstar-desktop-expanded.png" alt="Codexstar desktop expanded mode" width="720">
 
 卡面会贴在屏幕边缘显示，每个任务一张卡，标题、状态和运行时间都放在同一个视线范围里。
 
-![Codexstar card mode](docs/images/codexstar-card-mode.png)
+<img src="docs/images/codexstar-card-mode.png" alt="Codexstar card mode" width="420">
 
 中止或异常状态会单独变成红色卡面，提醒你回去看一眼；不需要保留的异常卡，也可以手动点掉。
 
@@ -22,7 +22,7 @@ Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工
 
 任务卡片可以折叠成一排小灯泡，一个灯泡代表一个任务。写东西、看视频、打游戏时，它不会霸占注意力；资源占用也会更低。
 
-![Codexstar desktop collapsed mode](docs/images/codexstar-desktop-collapsed.png)
+<img src="docs/images/codexstar-desktop-collapsed.png" alt="Codexstar desktop collapsed mode" width="720">
 
 小灯模式只保留颜色信号：有任务、已完成、异常，都不用打开 Codex 就能看出来。
 
@@ -32,7 +32,7 @@ Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工
 
 内置 8 款作者精选完成提示音，可在菜单里试听和选择。也可以设置“超过几分钟才响”，短对话不至于一直叮叮当当。
 
-![Codexstar sound settings](docs/images/codexstar-sound-settings.png)
+<img src="docs/images/codexstar-sound-settings.png" alt="Codexstar sound settings" width="300">
 
 ### 4. 额度面
 
@@ -47,7 +47,7 @@ Codexstar 是我给 Codex 做的 Windows 浮窗状态灯。它不试图替你工
 ## 安装
 
 1. 打开 [最新 Release](https://github.com/StevenSong77/codexstar/releases/latest)。
-2. 下载 `Codexstar-v1.0.1-win-x64.zip`。
+2. 下载 `Codexstar-v1.1-win-x64.zip`。
 3. 解压。
 4. 运行 `scripts\Install-Codexstar.cmd`。
 

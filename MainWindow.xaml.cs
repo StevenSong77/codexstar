@@ -363,7 +363,7 @@ public partial class MainWindow : Window
             AddItem(LanguageToggleText(), ToggleUiLanguage);
             AddItem(Ui("缩放", "Scale"), ShowScaleDialog);
             AddItem(Ui("关闭", "Close"), Close);
-            AddFooter("Codexstar v1.0");
+            AddFooter("Codexstar v1.1");
             return stack;
         }
 

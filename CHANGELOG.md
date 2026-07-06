@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1
+
+- Added English UI toggle for task cards, menus, tooltips, and settings panels.
+
 ## 1.0.1
 
 - Added quota page display toggle between remaining percent and refresh time.

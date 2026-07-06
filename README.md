@@ -94,7 +94,7 @@ Three card colors show working, review-pending, and needs-check states. The flow
 
 Each task gets its own card, with title, status, and duration kept in one quick glance.
 
-<img src="docs/images/codexstar-card-mode.png" alt="Codexstar card mode" width="420">
+<img src="docs/images/codexstar-english-card-mode.png" alt="Codexstar English card mode" width="720">
 
 Interrupted or failed tasks turn into a red card, so the one thing that needs attention does not blend into the rest.
 

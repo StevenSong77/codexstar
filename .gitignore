@@ -8,6 +8,7 @@ publish/
 *.7z
 *.rar
 *.log
+Start-CodexStatusLightWatch.vbs
 E_Tempscript/
 CodexstarRelease/
 TestResults/

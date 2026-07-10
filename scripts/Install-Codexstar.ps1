@@ -216,6 +216,8 @@ foreach ($doc in @('README.md', 'CHANGELOG.md', 'CREDITS.md', 'LICENSE-NOTE.md')
 }
 
 $watchCmd = Join-Path $installScriptsDir 'Watch-Codexstar.cmd'
+$watchHost = Join-Path $env:WINDIR 'System32\wscript.exe'
+$watchVbs = Join-Path $installScriptsDir 'Start-CodexstarWatch.vbs'
 if (-not $SkipStartup) {
     $shell = New-Object -ComObject WScript.Shell
     $startupDir = [Environment]::GetFolderPath('Startup')
@@ -225,8 +227,10 @@ if (-not $SkipStartup) {
     New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
     $startupShortcut = Join-Path $startupDir 'Codexstar Watcher.lnk'
     $shortcut = $shell.CreateShortcut($startupShortcut)
-    $shortcut.TargetPath = $watchCmd
+    $shortcut.TargetPath = $watchHost
+    $shortcut.Arguments = '"{0}"' -f $watchVbs
     $shortcut.WorkingDirectory = $installScriptsDir
+    $shortcut.WindowStyle = 7
     $shortcut.IconLocation = Join-Path $installAppDir 'CodexStatusLight.exe'
     $shortcut.Save()
     Write-Step "Startup shortcut installed: $startupShortcut"
@@ -239,7 +243,7 @@ if (-not $SkipNotify) {
 }
 
 if (-not $NoStart) {
-    Start-Process -FilePath $watchCmd -WindowStyle Hidden
+    Start-Process -FilePath $watchHost -ArgumentList @($watchVbs) -WindowStyle Hidden
     Write-Step 'Watcher started.'
 }
 

@@ -1,5 +1,5 @@
 param(
-    [string] $Version = '1.0.0',
+    [string] $Version = '1.2',
     [string] $ProjectDir = (Split-Path -Parent $PSScriptRoot),
     [string] $OutRoot = 'E:\Tempscript\CodexstarRelease',
     [string] $DesktopDir = ([Environment]::GetFolderPath('Desktop'))
@@ -31,9 +31,20 @@ Remove-Item -LiteralPath $releaseZip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $payloadRoot '*') -DestinationPath $releaseZip -Force
 
 $excludeDirs = @('\bin\', '\obj\', '\publish\', '\.git\')
+$excludeFiles = @(
+    'Start-CodexStatusLightWatch.vbs',
+    'external-balances.json',
+    'settings.json',
+    'state.json',
+    'install-state.json',
+    'debug.jsonl',
+    'watchdog.log'
+)
 $sourceFiles = Get-ChildItem -LiteralPath $ProjectDir -Recurse -Force -File | Where-Object {
     $full = $_.FullName
+    $fileName = $_.Name
     -not ($excludeDirs | Where-Object { $full.Contains($_) }) -and
+    -not ($excludeFiles -contains $fileName) -and
     $_.Name -notmatch '\.(zip|7z|rar)$'
 }
 

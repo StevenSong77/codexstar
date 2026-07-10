@@ -51,7 +51,7 @@ Codexstar 是一个给 OpenAI Codex / Codex Desktop 使用的 Windows 浮窗状�
 ## 安装
 
 1. 打开 [最新 Release](https://github.com/StevenSong77/codexstar/releases/latest)。
-2. 下载 `Codexstar-v1.1-win-x64.zip`。
+2. 下载 `Codexstar-v1.2-win-x64.zip`。
 3. 解压。
 4. 运行 `scripts\Install-Codexstar.cmd`。
 

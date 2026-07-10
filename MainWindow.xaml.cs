@@ -3,14 +3,19 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -33,15 +38,18 @@ public partial class MainWindow : Window
     private const double Gap = 10;
     private const double PanelPadding = 8;
     private const double PanelCornerRadius = 20;
-    private const double ToggleButtonSize = 24;
+    private const double ToggleButtonSize = 22;
     private const double ToggleButtonInset = 8;
     private const double CollapsedBulbSize = 18;
     private const double CollapsedBulbSpacing = 25;
     private const double CollapsedBulbLeftMargin = 18;
     private const double CollapsedBulbToToggleGap = 10;
-    private const double QuotaRingSize = 68;
-    private const double QuotaRingStroke = 6.0;
-    private const double QuotaPanelWidth = 242;
+    private const double QuotaRingSize = 62;
+    private const double QuotaRingStroke = 5.6;
+    private const double QuotaOnlyRingSize = 70;
+    private const double QuotaOnlyRingStroke = 6.1;
+    private const double QuotaOnlyPanelWidth = 260;
+    private const double QuotaPanelWidth = 304;
     private const double MinUiScalePercent = 10.0;
     private const double MaxUiScalePercent = 500.0;
     private const int NormalAnimationFrameRate = 30;
@@ -58,9 +66,17 @@ public partial class MainWindow : Window
     private const int SeenEventsTrimBatch = 500;
     private const int MaxCompletionSoundedTurns = 500;
     private const int CompletionSoundTrimBatch = 50;
+    private const int CompletionSoundSettleDelayMilliseconds = 200;
     private const int MaxInactiveFileOffsets = 500;
     private const int MaxActiveCompletionPlayers = 4;
     private const int CompletionPlayerTimeoutSeconds = 30;
+    private const int ExternalBalanceRefreshSeconds = 30;
+    private const string ExternalBalancesFileName = "external-balances.json";
+
+    private static readonly HttpClient ExternalBalanceHttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(12),
+    };
 
     private static readonly CompletionSoundChoice[] CompletionSoundChoices =
     {
@@ -84,6 +100,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, HashSet<string>> _activeTurnsByFile = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _exitingCards = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> _fileOffsets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DispatcherTimer> _pendingCompletionSoundTimers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _pendingCompletionSoundThreadIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _threadTitles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GoalState> _goals = new(StringComparer.OrdinalIgnoreCase);
     private RateLimitSnapshot? _rateLimits;
@@ -94,12 +112,14 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _pollTimer;
     private readonly DispatcherTimer _paintTimer;
     private readonly DispatcherTimer _globalStateDebounceTimer;
+    private readonly DispatcherTimer _externalBalanceTimer;
     private readonly string _codexRoot;
     private readonly string _sessionsRoot;
     private readonly string _stateDir;
     private readonly string _debugLogPath;
     private readonly string _manualStatePath;
     private readonly string _settingsPath;
+    private readonly string _externalBalancesPath;
     private readonly string _globalStatePath;
     private readonly string _sessionIndexPath;
     private readonly string _goalsDbPath;
@@ -122,12 +142,30 @@ public partial class MainWindow : Window
     private bool _isCollapsed;
     private bool _isQuotaPinned;
     private bool _showQuotaPercentInRing = true;
+    private bool _showExternalBalances = true;
+    private int _externalBalanceProviderCount = 2;
     private bool _dingDongEnabled = true;
     private string _completionSoundChoiceId = DefaultCompletionSoundId;
     private double _completionSoundThresholdMinutes = DefaultCompletionSoundThresholdMinutes;
     private UiLanguage _uiLanguage = UiLanguage.Chinese;
+    private string _shengshengBalanceText = "--";
+    private string _shengshengBalanceUpdatedAtText = "";
+    private string _deepkeyBalanceText = "--";
+    private double? _shengshengBalanceAmount;
+    private double? _deepkeyBalanceAmount;
+    private string _shengshengBalancePrefix = "";
+    private string _deepkeyBalancePrefix = "";
+    private double? _shengshengBaselineAmount;
+    private double? _deepkeyBaselineAmount;
+    private double? _shengshengLastObservedAmount;
+    private double? _deepkeyLastObservedAmount;
+    private double? _shengshengConsumedAmount;
+    private double? _deepkeyConsumedAmount;
+    private bool _externalBalanceRefreshInFlight;
     private bool _suppressCompletionSound;
     private bool _suppressSessionReplayDebug;
+    private bool _isBootstrappingSessions;
+    private readonly DateTime _runtimeStartedAtUtc = DateTime.UtcNow;
     private double _uiScalePercent = 100.0;
     private bool _isModeTransitionRunning;
     private DispatcherTimer? _modeTransitionTimer;
@@ -172,6 +210,7 @@ public partial class MainWindow : Window
             : configuredStateDir;
         _manualStatePath = IOPath.Combine(_stateDir, "state.json");
         _settingsPath = IOPath.Combine(_stateDir, "settings.json");
+        _externalBalancesPath = IOPath.Combine(_stateDir, ExternalBalancesFileName);
         _debugLogPath = IOPath.Combine(_stateDir, "debug.jsonl");
         Directory.CreateDirectory(_stateDir);
         MigrateLegacySettingsIfNeeded(string.IsNullOrWhiteSpace(configuredStateDir));
@@ -199,6 +238,11 @@ public partial class MainWindow : Window
             _globalStateDebounceTimer.Stop();
             RefreshGlobalStateFromWatcher();
         };
+
+        _externalBalanceTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(ExternalBalanceRefreshSeconds) };
+        _externalBalanceTimer.Tick += async (_, _) => await RefreshExternalBalancesAsync();
+        _externalBalanceTimer.Start();
+        _ = RefreshExternalBalancesAsync();
 
         Loaded += (_, _) =>
         {
@@ -319,6 +363,271 @@ public partial class MainWindow : Window
         Render();
     }
 
+    private void ShowSettingsDialog()
+    {
+        var dialog = CreateGlassDialog();
+        var stack = new StackPanel { MinWidth = ScaleValue(236) };
+
+        void Open(Action action)
+        {
+            dialog.Close();
+            Dispatcher.BeginInvoke(action, DispatcherPriority.Background);
+        }
+
+        stack.Children.Add(CreateDialogHeading(Ui("设置", "Settings")));
+        stack.Children.Add(CreateDialogActionRow(
+            _isQuotaPinned ? Ui("松开额度面", "Unpin Quota") : Ui("固定额度面", "Pin Quota"),
+            () => Open(PinQuotaPageFromMenu)));
+        stack.Children.Add(CreateDialogActionRow(
+            _showQuotaPercentInRing ? Ui("显示更新时间", "Show Reset Time") : Ui("显示百分比", "Show Percent"),
+            () => Open(ToggleQuotaDisplayMode)));
+        stack.Children.Add(CreateDialogActionRow(Ui("额度页面布置", "Quota Layout"), () => Open(ShowQuotaLayoutDialog)));
+        stack.Children.Add(CreateDialogActionRow(LanguageToggleText(), () => Open(ToggleUiLanguage)));
+        stack.Children.Add(CreateDialogActionRow(Ui("提示音个性化", "Sound Personalization"), () => Open(ShowCompletionSoundDialog)));
+
+        dialog.Content = CreateGlassDialogShell(stack);
+        dialog.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape)
+            {
+                dialog.Close();
+                e.Handled = true;
+            }
+        };
+        dialog.ShowDialog();
+    }
+
+    private void ShowQuotaLayoutDialog()
+    {
+        var dialog = CreateGlassDialog();
+        var credentials = ReadExternalBalanceEditorValues();
+        var showBalancesDraft = _showExternalBalances;
+        var providerCountDraft = _externalBalanceProviderCount;
+
+        Border ChoiceButton(string text, bool selected, bool enabled, Action onClick)
+        {
+            var marker = CreateSegmentRadioMarker(selected);
+            var label = new TextBlock
+            {
+                Text = text,
+                FontFamily = FontForChinese(),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = ScaleValue(12.7),
+                Foreground = CreateFrozenBrush(enabled ? Color.FromRgb(248, 250, 255) : Color.FromRgb(126, 134, 150)),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var content = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            content.Children.Add(marker);
+            content.Children.Add(label);
+            var button = new Border
+            {
+                Height = ScaleValue(31),
+                MinWidth = ScaleValue(66),
+                Padding = ScaleThickness(0, 0, 10, 0),
+                Margin = ScaleThickness(0, 0, 5, 0),
+                Background = Brushes.Transparent,
+                Cursor = enabled ? Cursors.Hand : Cursors.Arrow,
+                Opacity = enabled ? 1 : 0.36,
+                IsEnabled = enabled,
+                Child = content,
+            };
+            button.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                onClick();
+            };
+            return button;
+        }
+
+        TextBox TextInput(string text)
+        {
+            return new TextBox
+            {
+                Text = text,
+                FontFamily = FontForDuration(),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = ScaleValue(12.8),
+                Foreground = CreateFrozenBrush(Color.FromRgb(224, 232, 246)),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Padding = ScaleThickness(0, 0, 0, 1),
+                CaretBrush = CreateFrozenBrush(Color.FromRgb(248, 251, 255)),
+                VerticalContentAlignment = VerticalAlignment.Center,
+            };
+        }
+
+        PasswordBox TokenInput(string value)
+        {
+            return new PasswordBox
+            {
+                Password = value,
+                FontFamily = FontForDuration(),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = ScaleValue(12.8),
+                Foreground = CreateFrozenBrush(Color.FromRgb(224, 232, 246)),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Padding = ScaleThickness(0, 0, 0, 1),
+                CaretBrush = CreateFrozenBrush(Color.FromRgb(248, 251, 255)),
+                VerticalContentAlignment = VerticalAlignment.Center,
+            };
+        }
+
+        Border Field(string label, Control input)
+        {
+            var stack = new StackPanel();
+            stack.Children.Add(new TextBlock
+            {
+                Text = label,
+                FontFamily = FontForChinese(),
+                FontWeight = FontWeights.Medium,
+                FontSize = ScaleValue(11.2),
+                Foreground = CreateFrozenBrush(Color.FromRgb(186, 196, 215)),
+                Margin = ScaleThickness(0, 4, 0, 3),
+            });
+            stack.Children.Add(new Border
+            {
+                Height = ScaleValue(32),
+                CornerRadius = ScaleCornerRadius(10),
+                Padding = ScaleThickness(9, 1, 9, 1),
+                Background = CreateDialogFieldBrush(),
+                BorderBrush = CreateFrozenBrush(Color.FromArgb(82, 206, 216, 236)),
+                BorderThickness = new Thickness(ScaleValue(1)),
+                Child = input,
+            });
+            return new Border { Child = stack };
+        }
+
+        Border Station(string title, TextBox displayName, PasswordBox token)
+        {
+            var station = new StackPanel();
+            station.Children.Add(CreateDialogHeading(title));
+            station.Children.Add(Field(Ui("中转站名称", "Provider Name"), displayName));
+            station.Children.Add(Field(Ui("访问令牌", "Access Token"), token));
+            return new Border
+            {
+                Margin = ScaleThickness(0, 5, 0, 3),
+                Padding = ScaleThickness(9, 5, 9, 7),
+                CornerRadius = ScaleCornerRadius(12),
+                Background = CreateFrozenBrush(Color.FromArgb(22, 210, 220, 240)),
+                BorderBrush = CreateFrozenBrush(Color.FromArgb(52, 205, 216, 235)),
+                BorderThickness = new Thickness(ScaleValue(1)),
+                Child = station,
+            };
+        }
+
+        var showRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left };
+        var countRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left };
+        var shengshengToken = TokenInput(credentials.ShengshengToken);
+        var deepkeyToken = TokenInput(credentials.DeepkeyToken);
+        var shengshengName = TextInput(credentials.ShengshengDisplayName);
+        var deepkeyName = TextInput(credentials.DeepkeyDisplayName);
+        var firstStation = Station(Ui("站点 1", "Provider 1"), shengshengName, shengshengToken);
+        var secondStation = Station(Ui("站点 2", "Provider 2"), deepkeyName, deepkeyToken);
+        var providerArea = new StackPanel();
+        providerArea.Children.Add(CreateDialogHeading(Ui("中转站数量", "Provider Count")));
+        providerArea.Children.Add(countRow);
+        providerArea.Children.Add(firstStation);
+        providerArea.Children.Add(secondStation);
+
+        void RefreshChoices()
+        {
+            showRow.Children.Clear();
+            showRow.Children.Add(ChoiceButton(Ui("不显示", "Hide"), !showBalancesDraft, true, () =>
+            {
+                showBalancesDraft = false;
+                RefreshChoices();
+            }));
+            showRow.Children.Add(ChoiceButton(Ui("显示", "Show"), showBalancesDraft, true, () =>
+            {
+                showBalancesDraft = true;
+                RefreshChoices();
+            }));
+
+            countRow.Children.Clear();
+            countRow.Children.Add(ChoiceButton(Ui("一个", "One"), providerCountDraft == 1, showBalancesDraft, () =>
+            {
+                providerCountDraft = 1;
+                RefreshChoices();
+            }));
+            countRow.Children.Add(ChoiceButton(Ui("两个", "Two"), providerCountDraft == 2, showBalancesDraft, () =>
+            {
+                providerCountDraft = 2;
+                RefreshChoices();
+            }));
+
+            providerArea.Visibility = showBalancesDraft ? Visibility.Visible : Visibility.Collapsed;
+            secondStation.IsEnabled = showBalancesDraft && providerCountDraft == 2;
+            secondStation.Opacity = secondStation.IsEnabled ? 1 : 0.34;
+        }
+
+        void CloseDialog(bool apply)
+        {
+            if (apply)
+            {
+                SaveExternalBalanceLayoutConfiguration(
+                    showBalancesDraft,
+                    providerCountDraft,
+                    shengshengName.Text,
+                    credentials.ShengshengUserId,
+                    shengshengToken.Password,
+                    deepkeyName.Text,
+                    credentials.DeepkeyUserId,
+                    deepkeyToken.Password);
+            }
+
+            dialog.Close();
+        }
+
+        var stack = new StackPanel { MinWidth = ScaleValue(270), MaxWidth = ScaleValue(310) };
+        stack.Children.Add(CreateDialogHeading(Ui("额度页面布置", "Quota Layout")));
+        stack.Children.Add(new TextBlock
+        {
+            Text = Ui("中转站余额", "Provider Balances"),
+            FontFamily = FontForChinese(),
+            FontWeight = FontWeights.Medium,
+            FontSize = ScaleValue(11.2),
+            Foreground = CreateFrozenBrush(Color.FromRgb(186, 196, 215)),
+            Margin = ScaleThickness(0, 2, 0, 3),
+        });
+        stack.Children.Add(showRow);
+        stack.Children.Add(providerArea);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = ScaleThickness(0, 12, 0, 0),
+        };
+        buttons.Children.Add(CreateScaleDialogButton(Ui("取消", "Cancel"), () => CloseDialog(false)));
+        buttons.Children.Add(CreateScaleDialogButton(Ui("确定", "OK"), () => CloseDialog(true)));
+        stack.Children.Add(buttons);
+
+        dialog.Content = CreateGlassDialogShell(stack);
+        dialog.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+            {
+                CloseDialog(true);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                CloseDialog(false);
+                e.Handled = true;
+            }
+        };
+        dialog.Loaded += (_, _) =>
+        {
+            RefreshChoices();
+            if (showBalancesDraft)
+            {
+                shengshengName.Focus();
+            }
+        };
+        dialog.ShowDialog();
+    }
+
     private StackPanel CreateContextMenuStack(double scale, Action closeMenu, bool includeShow)
     {
         var stack = new StackPanel
@@ -367,17 +676,9 @@ public partial class MainWindow : Window
             return stack;
         }
 
-        AddItem(_isCollapsed ? Ui("展开", "Expand") : Ui("折叠", "Collapse"), ToggleCollapsed);
-        AddItem(_isQuotaPinned ? Ui("松开额度面", "Unpin Quota") : Ui("固定额度面", "Pin Quota"), PinQuotaPageFromMenu);
-        AddItem(_showQuotaPercentInRing ? Ui("显示更新时间", "Show Reset Time") : Ui("显示百分比", "Show Percent"), ToggleQuotaDisplayMode);
-        AddItem(Ui("提示音", "Sound"), ShowCompletionSoundDialog);
-        AddItem(LanguageToggleText(), ToggleUiLanguage);
+        AddItem(Ui("设置", "Settings"), ShowSettingsDialog);
         AddItem(Ui("缩放", "Scale"), ShowScaleDialog);
-        if (!includeShow)
-        {
-            AddItem(Ui("隐藏", "Hide"), HideToTray);
-        }
-
+        AddItem(Ui("隐藏", "Hide"), HideToTray);
         AddItem(Ui("刷新", "Refresh"), HardRefreshStatusLight);
 
         stack.Children.Add(new Border
@@ -438,6 +739,137 @@ public partial class MainWindow : Window
         return shell;
     }
 
+    private Window CreateGlassDialog()
+    {
+        var dialog = new Window
+        {
+            Owner = this,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            AllowsTransparency = true,
+            Background = Brushes.Transparent,
+            ShowInTaskbar = false,
+            Topmost = true,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SnapsToDevicePixels = true,
+        };
+        EnableDialogDrag(dialog);
+        return dialog;
+    }
+
+    private static void EnableDialogDrag(Window dialog)
+    {
+        bool IsInteractive(DependencyObject? source)
+        {
+            var current = source;
+            while (current is not null && !ReferenceEquals(current, dialog))
+            {
+                if (current is Control || current is Border { Cursor: not null })
+                {
+                    return true;
+                }
+
+                DependencyObject? parent = null;
+                try
+                {
+                    parent = VisualTreeHelper.GetParent(current);
+                }
+                catch
+                {
+                }
+                current = parent ?? LogicalTreeHelper.GetParent(current);
+            }
+
+            return false;
+        }
+
+        dialog.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || IsInteractive(e.OriginalSource as DependencyObject))
+            {
+                return;
+            }
+
+            try
+            {
+                dialog.DragMove();
+                e.Handled = true;
+            }
+            catch
+            {
+            }
+        };
+    }
+
+    private Border CreateDialogHeading(string text)
+    {
+        return new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            CornerRadius = ScaleCornerRadius(7),
+            Padding = ScaleThickness(9, 4, 9, 4),
+            Margin = ScaleThickness(0, 0, 0, 7),
+            Background = CreateDialogHeadingPlateBrush(),
+            BorderBrush = CreateFrozenBrush(Color.FromArgb(34, 238, 242, 250)),
+            BorderThickness = new Thickness(ScaleValue(1)),
+            Child = new TextBlock
+            {
+                Text = text,
+                FontFamily = FontForChinese(),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = ScaleValue(12.2),
+                Foreground = CreateFrozenBrush(Color.FromRgb(248, 250, 255)),
+            },
+        };
+    }
+
+    private Border CreateDialogActionRow(string text, Action action)
+    {
+        var row = CreateContextMenuRow(text, action);
+        row.MinWidth = ScaleValue(226);
+        row.Margin = ScaleThickness(0, 2, 0, 2);
+        return row;
+    }
+
+    private Grid CreateGlassDialogShell(UIElement content)
+    {
+        var padding = ScaleThickness(16, 14, 16, 14);
+        var corner = ScaleCornerRadius(16);
+        var rim = CreateFrozenBrush(Color.FromArgb(104, 205, 214, 235));
+        return new Grid
+        {
+            Children =
+            {
+                new Border
+                {
+                    CornerRadius = corner,
+                    Padding = padding,
+                    Background = CreateContextMenuBrush(),
+                    BorderBrush = rim,
+                    BorderThickness = new Thickness(ScaleValue(1)),
+                    IsHitTestVisible = false,
+                    Effect = new System.Windows.Media.Effects.DropShadowEffect
+                    {
+                        Color = Color.FromRgb(4, 8, 18),
+                        BlurRadius = ScaleValue(22),
+                        ShadowDepth = ScaleValue(8),
+                        Opacity = 0.34,
+                    },
+                },
+                new Border
+                {
+                    CornerRadius = corner,
+                    Padding = padding,
+                    Background = CreateContextMenuBrush(),
+                    BorderBrush = rim,
+                    BorderThickness = new Thickness(ScaleValue(1)),
+                    Child = content,
+                },
+            },
+        };
+    }
+
     private void ShowScaleDialog()
     {
         var dialog = new Window
@@ -453,6 +885,7 @@ public partial class MainWindow : Window
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             SnapsToDevicePixels = true,
         };
+        EnableDialogDrag(dialog);
 
         var input = new TextBox
         {
@@ -587,6 +1020,7 @@ public partial class MainWindow : Window
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             SnapsToDevicePixels = true,
         };
+        EnableDialogDrag(dialog);
 
         Border LabelPlate(string text)
         {
@@ -1639,6 +2073,13 @@ public partial class MainWindow : Window
             timer.Stop();
         }
 
+        foreach (var timer in _pendingCompletionSoundTimers.Values.ToList())
+        {
+            timer.Stop();
+        }
+        _pendingCompletionSoundTimers.Clear();
+        _pendingCompletionSoundThreadIds.Clear();
+
         _sessionWatcher?.Dispose();
         _sessionWatcher = null;
         _stateWatcher?.Dispose();
@@ -1934,6 +2375,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        var startedAtUtc = DateTime.UtcNow;
         var cutoff = DateTime.Now.AddHours(-24);
         var files = new DirectoryInfo(_sessionsRoot)
             .EnumerateFiles("*.jsonl", SearchOption.AllDirectories)
@@ -1947,6 +2389,7 @@ public partial class MainWindow : Window
         var previousReplaySuppression = _suppressSessionReplayDebug;
         _suppressCompletionSound = true;
         _suppressSessionReplayDebug = true;
+        _isBootstrappingSessions = true;
         try
         {
             foreach (var path in files)
@@ -1958,9 +2401,18 @@ public partial class MainWindow : Window
         {
             _suppressCompletionSound = previousSuppression;
             _suppressSessionReplayDebug = previousReplaySuppression;
+            _isBootstrappingSessions = false;
         }
 
         PruneStaleTasks();
+        DebugLog("bootstrap_complete", new
+        {
+            files = files.Count,
+            elapsedMs = Math.Round((DateTime.UtcNow - startedAtUtc).TotalMilliseconds),
+            weeklyRemaining = _rateLimits is null ? (double?)null : Math.Round(_rateLimits.WeeklyRemainingPercent),
+            fiveHourRemaining = _rateLimits is null ? (double?)null : Math.Round(_rateLimits.FiveHourRemainingPercent),
+            observedAtUtc = _rateLimits?.ObservedAtUtc,
+        });
     }
 
     private void ReadSessionFile(string path, bool fromStart)
@@ -1972,8 +2424,24 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var length = new FileInfo(path).Length;
-            var start = fromStart ? 0 : _fileOffsets.GetValueOrDefault(path);
+            var fileInfo = new FileInfo(path);
+            var length = fileInfo.Length;
+            long start;
+            if (fromStart)
+            {
+                start = 0;
+            }
+            else if (!_fileOffsets.TryGetValue(path, out start))
+            {
+                // Existing session files can be touched by metadata updates or model changes.
+                // Attach at EOF so their historical task events are never replayed.
+                var isNewDuringThisRuntime = fileInfo.CreationTimeUtc >= _runtimeStartedAtUtc.AddSeconds(-5);
+                start = isNewDuringThisRuntime ? 0 : length;
+                if (!isNewDuringThisRuntime)
+                {
+                    DebugLog("session_tail_attached", new { path, length, createdAtUtc = fileInfo.CreationTimeUtc });
+                }
+            }
             if (start > length)
             {
                 start = 0;
@@ -2001,6 +2469,11 @@ public partial class MainWindow : Window
 
     private void ProcessSessionLine(string path, string line)
     {
+        if (!line.Contains("\"type\":\"event_msg\"", StringComparison.Ordinal))
+        {
+            return;
+        }
+
         try
         {
             using var doc = JsonDocument.Parse(line);
@@ -2057,8 +2530,10 @@ public partial class MainWindow : Window
                 var startedAt = ReadUnixSeconds(payload, "started_at") ?? timestamp;
                 MarkTurnActive(path, turnId);
                 DebugLogSessionEvent("task_started", new { turnId, threadId, path, startedAt });
+                CancelPendingCompletionSoundsForThread(threadId, "followup_started");
                 RemoveSupersededTasks(threadId, GetThreadTitle(threadId), turnId);
-                UpsertTask(turnId, threadId, startedAt, TaskVisualStatus.Working, null, null);
+                var task = UpsertTask(turnId, threadId, startedAt, TaskVisualStatus.Working, null, null);
+                task.ObservedLiveStart = !_isBootstrappingSessions;
                 return;
             }
 
@@ -2070,8 +2545,24 @@ public partial class MainWindow : Window
                     : null;
                 MarkTurnInactive(path, turnId);
                 DebugLogSessionEvent("task_complete", new { turnId, threadId, path, completedAt, durationMs = duration?.TotalMilliseconds });
+                if (_isBootstrappingSessions)
+                {
+                    _tasks.Remove(turnId);
+                    return;
+                }
+
+                if (!_tasks.TryGetValue(turnId, out var existingTask))
+                {
+                    DebugLog("terminal_event_ignored", new { type = payloadType, turnId, threadId, reason = "no_observed_start" });
+                    _tasks.Remove(turnId);
+                    return;
+                }
+
                 var task = UpsertTask(turnId, threadId, completedAt - (duration ?? TimeSpan.Zero), TaskVisualStatus.Done, completedAt, duration);
-                TryPlayCompletionSound(task);
+                if (existingTask.ObservedLiveStart)
+                {
+                    QueueCompletionSoundAfterSettling(task);
+                }
                 return;
             }
 
@@ -2079,6 +2570,19 @@ public partial class MainWindow : Window
             {
                 MarkTurnInactive(path, turnId);
                 DebugLogSessionEvent("turn_aborted", new { turnId, threadId, path });
+                if (_isBootstrappingSessions)
+                {
+                    _tasks.Remove(turnId);
+                    return;
+                }
+
+                if (!_tasks.TryGetValue(turnId, out _))
+                {
+                    DebugLog("terminal_event_ignored", new { type = payloadType, turnId, threadId, reason = "no_observed_start" });
+                    _tasks.Remove(turnId);
+                    return;
+                }
+
                 var task = UpsertTask(turnId, threadId, timestamp, TaskVisualStatus.Error, timestamp, null);
                 task.Message = "已中止";
             }
@@ -2251,6 +2755,53 @@ public partial class MainWindow : Window
         });
 
         PlayCompletionSound(soundPath, task.TurnId);
+    }
+
+    private void QueueCompletionSoundAfterSettling(TaskState task)
+    {
+        CancelPendingCompletionSound(task.TurnId);
+
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(CompletionSoundSettleDelayMilliseconds) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            _pendingCompletionSoundTimers.Remove(task.TurnId);
+            _pendingCompletionSoundThreadIds.Remove(task.TurnId);
+
+            if (_tasks.TryGetValue(task.TurnId, out var currentTask) &&
+                ReferenceEquals(currentTask, task) &&
+                currentTask.Status == TaskVisualStatus.Done &&
+                currentTask.ObservedLiveStart)
+            {
+                TryPlayCompletionSound(currentTask);
+            }
+        };
+
+        _pendingCompletionSoundTimers[task.TurnId] = timer;
+        _pendingCompletionSoundThreadIds[task.TurnId] = task.ThreadId;
+        timer.Start();
+    }
+
+    private void CancelPendingCompletionSoundsForThread(string threadId, string reason)
+    {
+        foreach (var turnId in _pendingCompletionSoundThreadIds
+                     .Where(pair => string.Equals(pair.Value, threadId, StringComparison.OrdinalIgnoreCase))
+                     .Select(pair => pair.Key)
+                     .ToList())
+        {
+            DebugLog("completion_sound_cancelled", new { turnId, threadId, reason });
+            CancelPendingCompletionSound(turnId);
+        }
+    }
+
+    private void CancelPendingCompletionSound(string turnId)
+    {
+        if (_pendingCompletionSoundTimers.Remove(turnId, out var timer))
+        {
+            timer.Stop();
+        }
+
+        _pendingCompletionSoundThreadIds.Remove(turnId);
     }
 
     private static TimeSpan GetTaskDuration(TaskState task)
@@ -2484,6 +3035,18 @@ public partial class MainWindow : Window
                 _showQuotaPercentInRing = quotaModeProp.GetBoolean();
             }
 
+            if (TryGetProperty(doc.RootElement, out var externalBalancesProp, "showExternalBalances", "externalBalancesVisible") &&
+                externalBalancesProp.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                _showExternalBalances = externalBalancesProp.GetBoolean();
+            }
+
+            if (TryGetProperty(doc.RootElement, out var providerCountProp, "externalBalanceProviderCount") &&
+                TryReadDouble(providerCountProp, out var providerCount))
+            {
+                _externalBalanceProviderCount = Math.Clamp((int)Math.Round(providerCount), 1, 2);
+            }
+
             if (TryGetProperty(doc.RootElement, out var soundChoiceProp, "completionSoundChoiceId", "completionSoundId") &&
                 soundChoiceProp.ValueKind == JsonValueKind.String)
             {
@@ -2521,6 +3084,8 @@ public partial class MainWindow : Window
             {
                 quotaPinned = _isQuotaPinned,
                 quotaPercentInRing = _showQuotaPercentInRing,
+                showExternalBalances = _showExternalBalances,
+                externalBalanceProviderCount = _externalBalanceProviderCount,
                 scalePercent = Math.Round(_uiScalePercent, 1),
                 completionSoundEnabled = _dingDongEnabled,
                 completionSoundChoiceId = GetCompletionSoundChoice(_completionSoundChoiceId).Id,
@@ -2882,6 +3447,12 @@ public partial class MainWindow : Window
         _seenEventOrder.Clear();
         _completionSoundedTurns.Clear();
         _completionSoundedTurnOrder.Clear();
+        foreach (var timer in _pendingCompletionSoundTimers.Values.ToList())
+        {
+            timer.Stop();
+        }
+        _pendingCompletionSoundTimers.Clear();
+        _pendingCompletionSoundThreadIds.Clear();
 
         lock (_pendingFiles)
         {
@@ -3269,6 +3840,8 @@ public partial class MainWindow : Window
         var builder = new StringBuilder();
         builder.Append(_isQuotaPinned).Append('|')
             .Append(_showQuotaPercentInRing).Append('|')
+            .Append(_showExternalBalances).Append(':')
+            .Append(_externalBalanceProviderCount).Append('|')
             .Append(_isCollapsed).Append('|')
             .Append(_cards.Count).Append('|');
 
@@ -4275,7 +4848,17 @@ public partial class MainWindow : Window
 
         shell.Children.Add(grid);
 
-        var quotaPanel = CreateQuotaPanel(out var weeklyQuotaArc, out var weeklyQuotaText, out var fiveHourQuotaArc, out var fiveHourQuotaText);
+        var quotaPanel = CreateQuotaPanel(
+            out var weeklyQuotaArc,
+            out var weeklyQuotaText,
+            out var fiveHourQuotaArc,
+            out var fiveHourQuotaText,
+            out var shengshengBalanceText,
+            out var shengshengBalanceArrowText,
+            out var shengshengBalanceDeltaText,
+            out var deepkeyBalanceText,
+            out var deepkeyBalanceArrowText,
+            out var deepkeyBalanceDeltaText);
         shell.Children.Add(quotaPanel);
 
         var quotaPinButton = CreateQuotaPinButton(out var quotaPinHead, out var quotaPinNeedle);
@@ -4283,6 +4866,12 @@ public partial class MainWindow : Window
         quotaPinButton.VerticalAlignment = VerticalAlignment.Top;
         quotaPinButton.Margin = new Thickness(0, ToggleButtonInset, ToggleButtonInset + ToggleButtonSize + 6, 0);
         shell.Children.Add(quotaPinButton);
+
+        var quotaResetButton = CreateExternalBalanceResetButton();
+        quotaResetButton.HorizontalAlignment = HorizontalAlignment.Right;
+        quotaResetButton.VerticalAlignment = VerticalAlignment.Top;
+        quotaResetButton.Margin = new Thickness(0, ToggleButtonInset, ToggleButtonInset + (ToggleButtonSize + 6) * 2, 0);
+        shell.Children.Add(quotaResetButton);
 
         var collapseButton = CreatePanelToggleButton(collapsed: false);
         collapseButton.HorizontalAlignment = HorizontalAlignment.Right;
@@ -4320,7 +4909,7 @@ public partial class MainWindow : Window
             }
         };
 
-        var card = new TaskCard(border, surface, surfaceGlow, translate, pixels, glass, edgeHighlights, flash, grid, quotaPanel, weeklyQuotaArc, weeklyQuotaText, fiveHourQuotaArc, fiveHourQuotaText, quotaPinButton, quotaPinHead, quotaPinNeedle, title, message, badge, badgeText, durationTrail, durationAura, durationCore, duration, collapseButton);
+        var card = new TaskCard(border, surface, surfaceGlow, translate, pixels, glass, edgeHighlights, flash, grid, quotaPanel, weeklyQuotaArc, weeklyQuotaText, fiveHourQuotaArc, fiveHourQuotaText, shengshengBalanceText, shengshengBalanceArrowText, shengshengBalanceDeltaText, deepkeyBalanceText, deepkeyBalanceArrowText, deepkeyBalanceDeltaText, quotaPinButton, quotaResetButton, quotaPinHead, quotaPinNeedle, title, message, badge, badgeText, durationTrail, durationAura, durationCore, duration, collapseButton);
         BuildPixels(card, palette, task.Status);
         return card;
     }
@@ -4390,61 +4979,270 @@ public partial class MainWindow : Window
         return button;
     }
 
-    private Grid CreateQuotaPanel(out ShapePath weeklyArc, out TextBlock weeklyText, out ShapePath fiveHourArc, out TextBlock fiveHourText)
+    private Grid CreateQuotaPanel(
+        out ShapePath weeklyArc,
+        out TextBlock weeklyText,
+        out ShapePath fiveHourArc,
+        out TextBlock fiveHourText,
+        out TextBlock shengshengBalanceText,
+        out TextBlock shengshengBalanceArrowText,
+        out TextBlock shengshengBalanceDeltaText,
+        out TextBlock deepkeyBalanceText,
+        out TextBlock deepkeyBalanceArrowText,
+        out TextBlock deepkeyBalanceDeltaText)
     {
         var panel = new Grid
         {
-            Width = QuotaPanelWidth,
-            Margin = new Thickness(0, 5, 0, 5),
-            HorizontalAlignment = HorizontalAlignment.Center,
+            Width = _showExternalBalances ? QuotaPanelWidth : QuotaOnlyPanelWidth,
+            Margin = _showExternalBalances ? new Thickness(12, 5, 0, 5) : new Thickness(0, 5, 0, 5),
+            HorizontalAlignment = _showExternalBalances ? HorizontalAlignment.Left : HorizontalAlignment.Center,
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = true,
         };
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_showExternalBalances ? 142 : QuotaOnlyPanelWidth) });
+        if (_showExternalBalances)
+        {
+            panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
+            panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(156) });
+        }
+
+        var quotaOnlyLayout = !_showExternalBalances;
+        Panel rings = quotaOnlyLayout
+            ? new Grid
+            {
+                Width = QuotaOnlyPanelWidth,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Auto },
+                    new ColumnDefinition { Width = new GridLength(31) },
+                    new ColumnDefinition { Width = GridLength.Auto },
+                },
+            }
+            : new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
 
         var weeklyRing = CreateQuotaRing(
             Color.FromRgb(219, 225, 232),
             Color.FromArgb(48, 226, 232, 240),
             out weeklyArc,
-            out weeklyText);
-        Grid.SetColumn(weeklyRing, 0);
-        panel.Children.Add(weeklyRing);
+            out weeklyText,
+            quotaOnlyLayout ? QuotaOnlyRingSize : QuotaRingSize,
+            quotaOnlyLayout ? QuotaOnlyRingStroke : QuotaRingStroke);
+        weeklyRing.Margin = quotaOnlyLayout ? new Thickness(0) : new Thickness(0, 0, 2, 0);
+        rings.Children.Add(weeklyRing);
 
         var fiveHourRing = CreateQuotaRing(
             Color.FromRgb(158, 215, 174),
             Color.FromArgb(42, 177, 226, 191),
             out fiveHourArc,
-            out fiveHourText);
-        Grid.SetColumn(fiveHourRing, 1);
-        panel.Children.Add(fiveHourRing);
+            out fiveHourText,
+            quotaOnlyLayout ? QuotaOnlyRingSize : QuotaRingSize,
+            quotaOnlyLayout ? QuotaOnlyRingStroke : QuotaRingStroke);
+        fiveHourRing.Margin = quotaOnlyLayout ? new Thickness(0) : new Thickness(2, 0, 0, 0);
+        if (quotaOnlyLayout)
+        {
+            Grid.SetColumn(weeklyRing, 0);
+            Grid.SetColumn(fiveHourRing, 2);
+        }
+        rings.Children.Add(fiveHourRing);
+        Grid.SetColumn(rings, 0);
+        panel.Children.Add(rings);
+
+        shengshengBalanceText = CreateExternalBalanceValueText();
+        shengshengBalanceArrowText = CreateExternalBalanceArrowText();
+        shengshengBalanceDeltaText = CreateExternalBalanceDeltaText();
+        deepkeyBalanceText = CreateExternalBalanceValueText();
+        deepkeyBalanceArrowText = CreateExternalBalanceArrowText();
+        deepkeyBalanceDeltaText = CreateExternalBalanceDeltaText();
+        if (_showExternalBalances)
+        {
+            var isSingleProvider = _externalBalanceProviderCount == 1;
+            var balanceStack = new StackPanel
+            {
+                Margin = isSingleProvider ? new Thickness(0, 20, 0, 0) : new Thickness(0, 26, 0, 0),
+                VerticalAlignment = VerticalAlignment.Top,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            balanceStack.Children.Add(CreateExternalBalancePlate(
+                shengshengBalanceText,
+                shengshengBalanceArrowText,
+                shengshengBalanceDeltaText,
+                TaskVisualStatus.Done,
+                isSingleProvider ? 36 : 26));
+            if (!isSingleProvider)
+            {
+                balanceStack.Children.Add(CreateExternalBalancePlate(deepkeyBalanceText, deepkeyBalanceArrowText, deepkeyBalanceDeltaText, TaskVisualStatus.Working));
+            }
+            Grid.SetColumn(balanceStack, 2);
+            panel.Children.Add(balanceStack);
+        }
 
         return panel;
     }
 
-    private Grid CreateQuotaRing(Color accent, Color track, out ShapePath arc, out TextBlock text)
+    private TextBlock CreateExternalBalanceValueText()
+    {
+        return new TextBlock
+        {
+            FontFamily = FontForDuration(),
+            FontWeight = FontWeights.Black,
+            FontSize = 15.8,
+            Foreground = CreateFrozenBrush(Color.FromRgb(230, 236, 247)),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextAlignment = TextAlignment.Left,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    private TextBlock CreateExternalBalanceArrowText()
+    {
+        return new TextBlock
+        {
+            FontFamily = FontForChinese(),
+            FontWeight = FontWeights.Black,
+            FontSize = 10.8,
+            Foreground = CreateFrozenBrush(Color.FromRgb(134, 224, 157)),
+            Text = "",
+            TextAlignment = TextAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(3, 0, 2, 0),
+            RenderTransform = new TranslateTransform(0, -3.4),
+        };
+    }
+
+    private TextBlock CreateExternalBalanceDeltaText()
+    {
+        return new TextBlock
+        {
+            FontFamily = FontForDuration(),
+            FontWeight = FontWeights.Black,
+            FontSize = 15.8,
+            Foreground = CreateFrozenBrush(Color.FromRgb(134, 224, 157)),
+            Text = "",
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextAlignment = TextAlignment.Left,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    private Border CreateExternalBalancePlate(TextBlock valueText, TextBlock arrowText, TextBlock deltaText, TaskVisualStatus tint, double height = 26)
+    {
+        var palette = GetPalette(tint);
+        var content = new Grid();
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(56) });
+        Grid.SetColumn(valueText, 0);
+        Grid.SetColumn(arrowText, 1);
+        Grid.SetColumn(deltaText, 2);
+        content.Children.Add(valueText);
+        content.Children.Add(arrowText);
+        content.Children.Add(deltaText);
+
+        return new Border
+        {
+            Height = height,
+            Margin = new Thickness(0),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(7, 0, 5, 1),
+            Background = CreateExternalBalancePlateBrush(palette),
+            BorderBrush = CreateExternalBalancePlateRimBrush(palette),
+            BorderThickness = new Thickness(1),
+            Child = content,
+        };
+    }
+
+    private Border CreateExternalBalanceResetButton()
+    {
+        var palette = GetPalette(TaskVisualStatus.Idle);
+        var icon = new Canvas
+        {
+            Width = 15,
+            Height = 15,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        icon.Children.Add(new ShapePath
+        {
+            Data = Geometry.Parse("M8,4 L4,8 L8,12 M4,8 H13 C16,8 18,10 18,13 C18,16 16,18 13,18 H9"),
+            Stroke = CreateFrozenBrush(Color.FromRgb(246, 248, 255)),
+            StrokeThickness = 1.82,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round,
+            Fill = Brushes.Transparent,
+            RenderTransform = new TransformGroup
+            {
+                Children =
+                {
+                    new ScaleTransform(0.72, 0.72),
+                    new TranslateTransform(-0.9, -0.9),
+                }
+            },
+            RenderTransformOrigin = new Point(0, 0),
+        });
+
+        var button = new Border
+        {
+            Width = ToggleButtonSize,
+            Height = ToggleButtonSize,
+            CornerRadius = new CornerRadius(8),
+            Background = CreateToggleButtonBrush(palette),
+            BorderBrush = CreateToggleButtonRimBrush(palette),
+            BorderThickness = new Thickness(1),
+            Cursor = Cursors.Hand,
+            Child = icon,
+            ToolTip = CreateControlToolTip(Ui("设置归零水平面", "Set baseline")),
+            Visibility = Visibility.Collapsed,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = Color.FromRgb(168, 176, 190),
+                BlurRadius = 9,
+                ShadowDepth = 0,
+                Opacity = 0.18,
+            },
+        };
+        button.MouseLeftButtonDown += (_, e) => e.Handled = true;
+        button.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            SetExternalBalanceBaseline();
+        };
+        return button;
+    }
+
+    private Grid CreateQuotaRing(Color accent, Color track, out ShapePath arc, out TextBlock text, double ringSize = QuotaRingSize, double ringStroke = QuotaRingStroke)
     {
         var ring = new Grid
         {
-            Width = 112,
-            Height = 84,
+            Width = ringSize + 7,
+            Height = ringSize + 14,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
         };
 
         var ringHost = new Grid
         {
-            Width = QuotaRingSize,
-            Height = QuotaRingSize,
+            Width = ringSize,
+            Height = ringSize,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
         };
 
         var trackRing = new Ellipse
         {
-            Width = QuotaRingSize,
-            Height = QuotaRingSize,
-            StrokeThickness = QuotaRingStroke,
+            Width = ringSize,
+            Height = ringSize,
+            StrokeThickness = ringStroke,
             Stroke = CreateFrozenBrush(track),
         };
         ToolTipService.SetInitialShowDelay(trackRing, 120);
@@ -4453,7 +5251,7 @@ public partial class MainWindow : Window
 
         arc = new ShapePath
         {
-            StrokeThickness = QuotaRingStroke,
+            StrokeThickness = ringStroke,
             Stroke = CreateFrozenBrush(accent),
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
@@ -4472,8 +5270,8 @@ public partial class MainWindow : Window
 
         var centerGlass = new Ellipse
         {
-            Width = 54,
-            Height = 54,
+            Width = ringSize - 8,
+            Height = ringSize - 8,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Fill = CreateQuotaCenterGlassBrush(accent),
@@ -4490,8 +5288,8 @@ public partial class MainWindow : Window
             Foreground = CreateFrozenBrush(accent),
             FontFamily = FontForDuration(),
             FontWeight = FontWeights.Black,
-            FontSize = 21.0,
-            Width = 52,
+            FontSize = 19.2 * ringSize / QuotaRingSize,
+            Width = ringSize - 10,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             TextAlignment = TextAlignment.Center,
@@ -4499,7 +5297,7 @@ public partial class MainWindow : Window
         };
         ToolTipService.SetInitialShowDelay(text, 120);
         ToolTipService.SetShowDuration(text, 60000);
-        arc.Tag = new QuotaTooltipTargets(trackRing, centerGlass);
+        arc.Tag = new QuotaTooltipTargets(trackRing, centerGlass, ringSize, ringStroke);
         ringHost.Children.Add(text);
         ring.Children.Add(ringHost);
         return ring;
@@ -4507,6 +5305,7 @@ public partial class MainWindow : Window
 
     private void UpdateIdleQuotaPanel(TaskCard card)
     {
+        UpdateExternalBalancePanel(card);
         if (_rateLimits is null)
         {
             card.FiveHourQuotaRemainingPercent = null;
@@ -4533,6 +5332,824 @@ public partial class MainWindow : Window
             card.FiveHourQuotaText,
             _rateLimits.FiveHourRemainingPercent,
             FormatQuotaResetTime(_rateLimits.FiveHourResetsAt));
+    }
+
+    private void UpdateExternalBalancePanel(TaskCard card)
+    {
+        SetExternalBalanceText(card.ShengshengBalanceText, _shengshengBalanceText, _shengshengBalanceUpdatedAtText);
+        UpdateExternalBalanceDelta(card.ShengshengBalanceArrowText, card.ShengshengBalanceDeltaText, _shengshengConsumedAmount);
+        SetExternalBalanceText(card.DeepkeyBalanceText, _deepkeyBalanceText, "");
+        UpdateExternalBalanceDelta(card.DeepkeyBalanceArrowText, card.DeepkeyBalanceDeltaText, _deepkeyConsumedAmount);
+    }
+
+    private static void SetExternalBalanceText(TextBlock textBlock, string balanceText, string updatedAtText)
+    {
+        textBlock.Inlines.Clear();
+        textBlock.Inlines.Add(new Run(balanceText));
+        if (!string.IsNullOrWhiteSpace(updatedAtText))
+        {
+            textBlock.Inlines.Add(new Run(" " + updatedAtText)
+            {
+                Foreground = CreateFrozenBrush(Color.FromArgb(150, 210, 215, 226)),
+                FontFamily = FontForChinese(),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 9.8,
+            });
+        }
+    }
+
+    private static void UpdateExternalBalanceDelta(TextBlock arrowText, TextBlock deltaText, double? consumed)
+    {
+        var consumedText = FormatExternalBalanceConsumption(consumed);
+        arrowText.Text = string.IsNullOrWhiteSpace(consumedText) ? "" : "▼";
+        deltaText.Text = consumedText;
+    }
+
+    private static string FormatExternalBalanceConsumption(double? consumed)
+    {
+        if (!consumed.HasValue)
+        {
+            return "";
+        }
+
+        var normalized = Math.Max(0, consumed.Value);
+        if (normalized < 0.005)
+        {
+            normalized = 0;
+        }
+
+        return normalized.ToString(normalized >= 100 ? "#,0.##" : "0.##", CultureInfo.InvariantCulture);
+    }
+
+    private void SetExternalBalanceBaseline()
+    {
+        _shengshengBaselineAmount = _shengshengBalanceAmount;
+        _deepkeyBaselineAmount = _deepkeyBalanceAmount;
+        _shengshengLastObservedAmount = _shengshengBalanceAmount;
+        _deepkeyLastObservedAmount = _deepkeyBalanceAmount;
+        _shengshengConsumedAmount = _shengshengBalanceAmount.HasValue ? 0 : null;
+        _deepkeyConsumedAmount = _deepkeyBalanceAmount.HasValue ? 0 : null;
+        SaveExternalBalanceAccounting();
+        UpdateExternalBalancePanels();
+    }
+
+    private void SaveExternalBalanceAccounting()
+    {
+        try
+        {
+            if (!File.Exists(_externalBalancesPath))
+            {
+                return;
+            }
+
+            var root = JsonNode.Parse(File.ReadAllText(_externalBalancesPath, Encoding.UTF8)) as JsonObject;
+            if (root?["providers"] is not JsonArray providers)
+            {
+                return;
+            }
+
+            SetExternalBalanceAccountingNode(providers, "shengsheng", _shengshengBaselineAmount, _shengshengLastObservedAmount, _shengshengConsumedAmount);
+            SetExternalBalanceAccountingNode(providers, "deepkey", _deepkeyBaselineAmount, _deepkeyLastObservedAmount, _deepkeyConsumedAmount);
+            File.WriteAllText(
+                _externalBalancesPath,
+                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
+                Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_accounting_save_failed", new { error = ex.Message });
+        }
+    }
+
+    private static void SetExternalBalanceAccountingNode(JsonArray providers, string providerId, double? baselineAmount, double? lastObservedAmount, double? consumedAmount)
+    {
+        foreach (var item in providers)
+        {
+            if (item is not JsonObject provider ||
+                !string.Equals((string?)provider["id"], providerId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            provider["baselineAmount"] = baselineAmount.HasValue ? JsonValue.Create(baselineAmount.Value) : null;
+            provider["lastObservedAmount"] = lastObservedAmount.HasValue ? JsonValue.Create(lastObservedAmount.Value) : null;
+            provider["consumedAmount"] = consumedAmount.HasValue ? JsonValue.Create(consumedAmount.Value) : null;
+            return;
+        }
+    }
+
+    private void UpdateExternalBalancePanels()
+    {
+        foreach (var card in _cards.Values.Distinct())
+        {
+            UpdateExternalBalancePanel(card);
+        }
+    }
+
+    private async Task RefreshExternalBalancesAsync()
+    {
+        if (_externalBalanceRefreshInFlight)
+        {
+            return;
+        }
+
+        _externalBalanceRefreshInFlight = true;
+        try
+        {
+            var providers = LoadExternalBalanceProviders();
+            var accountingChanged = false;
+            if (_showExternalBalances && providers.TryGetValue("shengsheng", out var shengsheng))
+            {
+                _shengshengBaselineAmount = shengsheng.BaselineAmount;
+                _shengshengLastObservedAmount = shengsheng.LastObservedAmount;
+                _shengshengConsumedAmount = shengsheng.ConsumedAmount;
+                var snapshot = await FetchExternalBalanceSnapshotAsync(shengsheng);
+                if (snapshot.HasValue)
+                {
+                    _shengshengBalanceText = snapshot.Value.DisplayText;
+                    _shengshengBalanceAmount = snapshot.Value.Amount;
+                    _shengshengBalancePrefix = snapshot.Value.CurrencyPrefix;
+                    _shengshengBalanceUpdatedAtText = snapshot.Value.SecondaryText ?? "";
+                    accountingChanged |= ApplyExternalBalanceAccounting("shengsheng", snapshot.Value.Amount, shengsheng);
+                }
+            }
+
+            if (_showExternalBalances && _externalBalanceProviderCount == 2 && providers.TryGetValue("deepkey", out var deepkey))
+            {
+                _deepkeyBaselineAmount = deepkey.BaselineAmount;
+                _deepkeyLastObservedAmount = deepkey.LastObservedAmount;
+                _deepkeyConsumedAmount = deepkey.ConsumedAmount;
+                var snapshot = await FetchExternalBalanceSnapshotAsync(deepkey);
+                if (snapshot.HasValue)
+                {
+                    _deepkeyBalanceText = snapshot.Value.DisplayText;
+                    _deepkeyBalanceAmount = snapshot.Value.Amount;
+                    _deepkeyBalancePrefix = snapshot.Value.CurrencyPrefix;
+                    accountingChanged |= ApplyExternalBalanceAccounting("deepkey", snapshot.Value.Amount, deepkey);
+                }
+            }
+
+            if (accountingChanged)
+            {
+                SaveExternalBalanceAccounting();
+            }
+
+            UpdateExternalBalancePanels();
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_refresh_failed", new { error = ex.Message });
+        }
+        finally
+        {
+            _externalBalanceRefreshInFlight = false;
+        }
+    }
+
+    private bool ApplyExternalBalanceAccounting(string providerId, double? currentAmount, ExternalBalanceProviderConfig provider)
+    {
+        if (!currentAmount.HasValue)
+        {
+            return false;
+        }
+
+        var previousConsumed = provider.ConsumedAmount;
+        var consumed = previousConsumed;
+        if (!consumed.HasValue && provider.BaselineAmount.HasValue)
+        {
+            consumed = Math.Max(0, provider.BaselineAmount.Value - currentAmount.Value);
+        }
+
+        if (provider.LastObservedAmount.HasValue)
+        {
+            var spentSinceLastRefresh = provider.LastObservedAmount.Value - currentAmount.Value;
+            if (spentSinceLastRefresh > 0.004)
+            {
+                consumed = Math.Max(0, consumed ?? 0) + spentSinceLastRefresh;
+            }
+        }
+
+        if (providerId.Equals("shengsheng", StringComparison.OrdinalIgnoreCase))
+        {
+            _shengshengLastObservedAmount = currentAmount;
+            _shengshengConsumedAmount = consumed;
+        }
+        else if (providerId.Equals("deepkey", StringComparison.OrdinalIgnoreCase))
+        {
+            _deepkeyLastObservedAmount = currentAmount;
+            _deepkeyConsumedAmount = consumed;
+        }
+
+        return !NullableDoubleEquals(provider.LastObservedAmount, currentAmount) ||
+               !NullableDoubleEquals(previousConsumed, consumed);
+    }
+
+    private static bool NullableDoubleEquals(double? left, double? right)
+    {
+        if (!left.HasValue || !right.HasValue)
+        {
+            return left.HasValue == right.HasValue;
+        }
+
+        return Math.Abs(left.Value - right.Value) < 0.000001;
+    }
+
+    private Dictionary<string, ExternalBalanceProviderConfig> LoadExternalBalanceProviders()
+    {
+        var providers = new Dictionary<string, ExternalBalanceProviderConfig>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(_externalBalancesPath))
+        {
+            return providers;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(_externalBalancesPath, Encoding.UTF8));
+            if (!doc.RootElement.TryGetProperty("providers", out var providersElement) ||
+                providersElement.ValueKind != JsonValueKind.Array)
+            {
+                return providers;
+            }
+
+            foreach (var provider in providersElement.EnumerateArray())
+            {
+                var id = ReadString(provider, "id");
+                var baseUrl = ReadString(provider, "baseUrl");
+                var kind = ReadString(provider, "kind");
+                var systemToken = ReadString(provider, "systemToken") ?? ReadString(provider, "apiKey");
+                var userId = ReadString(provider, "userId");
+                var baselineAmount = ReadNullableDoubleProperty(provider, "baselineAmount");
+                var lastObservedAmount = ReadNullableDoubleProperty(provider, "lastObservedAmount");
+                var consumedAmount = ReadNullableDoubleProperty(provider, "consumedAmount");
+                if (string.IsNullOrWhiteSpace(id) ||
+                    string.IsNullOrWhiteSpace(baseUrl) ||
+                    string.IsNullOrWhiteSpace(systemToken))
+                {
+                    continue;
+                }
+
+                var endpoints = new List<string>();
+                if (provider.TryGetProperty("endpoints", out var endpointsElement) &&
+                    endpointsElement.ValueKind == JsonValueKind.Array)
+                {
+                    endpoints.AddRange(endpointsElement.EnumerateArray()
+                        .Where(item => item.ValueKind == JsonValueKind.String)
+                        .Select(item => item.GetString())
+                        .Where(item => !string.IsNullOrWhiteSpace(item))!);
+                }
+
+                if (endpoints.Count == 0)
+                {
+                    endpoints.AddRange(new[] { "/api/user/self", "/api/user/amount", "/api/user/quota_stats" });
+                }
+
+                providers[id] = new ExternalBalanceProviderConfig(id, baseUrl.TrimEnd('/'), kind, systemToken, userId, endpoints, baselineAmount, lastObservedAmount, consumedAmount);
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_config_failed", new { error = ex.Message });
+        }
+
+        return providers;
+    }
+
+    private ExternalBalanceEditorValues ReadExternalBalanceEditorValues()
+    {
+        try
+        {
+            if (!File.Exists(_externalBalancesPath))
+            {
+                return new ExternalBalanceEditorValues("省省", "", "", "Deepkey", "", "");
+            }
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(_externalBalancesPath, Encoding.UTF8));
+            if (!doc.RootElement.TryGetProperty("providers", out var providers) || providers.ValueKind != JsonValueKind.Array)
+            {
+                return new ExternalBalanceEditorValues("省省", "", "", "Deepkey", "", "");
+            }
+
+            string ReadValue(string providerId, string property, string fallback = "")
+            {
+                foreach (var provider in providers.EnumerateArray())
+                {
+                    if (string.Equals(ReadString(provider, "id"), providerId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var value = ReadString(provider, property);
+                        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+                    }
+                }
+
+                return fallback;
+            }
+
+            var shengshengToken = ReadValue("shengsheng", "systemToken");
+            if (string.IsNullOrWhiteSpace(shengshengToken))
+            {
+                shengshengToken = ReadValue("shengsheng", "apiKey");
+            }
+
+            var deepkeyToken = ReadValue("deepkey", "systemToken");
+            if (string.IsNullOrWhiteSpace(deepkeyToken))
+            {
+                deepkeyToken = ReadValue("deepkey", "apiKey");
+            }
+
+            return new ExternalBalanceEditorValues(
+                ReadValue("shengsheng", "displayName", "省省"),
+                ReadValue("shengsheng", "userId"),
+                shengshengToken,
+                ReadValue("deepkey", "displayName", "Deepkey"),
+                ReadValue("deepkey", "userId"),
+                deepkeyToken);
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_editor_load_failed", new { error = ex.Message });
+            return new ExternalBalanceEditorValues("省省", "", "", "Deepkey", "", "");
+        }
+    }
+
+    private void SaveExternalBalanceLayoutConfiguration(
+        bool showBalances,
+        int providerCount,
+        string shengshengDisplayName,
+        string shengshengUserId,
+        string shengshengToken,
+        string deepkeyDisplayName,
+        string deepkeyUserId,
+        string deepkeyToken)
+    {
+        _showExternalBalances = showBalances;
+        _externalBalanceProviderCount = Math.Clamp(providerCount, 1, 2);
+
+        if (showBalances)
+        {
+            SaveExternalBalanceProviderCredentials(
+                shengshengUserId,
+                shengshengToken,
+                shengshengDisplayName,
+                deepkeyUserId,
+                deepkeyToken,
+                deepkeyDisplayName,
+                _externalBalanceProviderCount);
+        }
+
+        SaveUiSettings();
+        DebugLog("external_balance_layout_saved", new
+        {
+            visible = _showExternalBalances,
+            providerCount = _externalBalanceProviderCount,
+        });
+        HardRefreshStatusLight();
+        _ = RefreshExternalBalancesAsync();
+    }
+
+    private void SaveExternalBalanceProviderCredentials(
+        string shengshengUserId,
+        string shengshengToken,
+        string shengshengDisplayName,
+        string deepkeyUserId,
+        string deepkeyToken,
+        string deepkeyDisplayName,
+        int providerCount)
+    {
+        try
+        {
+            JsonObject root;
+            if (File.Exists(_externalBalancesPath))
+            {
+                root = JsonNode.Parse(File.ReadAllText(_externalBalancesPath, Encoding.UTF8)) as JsonObject ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            var providers = root["providers"] as JsonArray ?? new JsonArray();
+            root["providers"] = providers;
+
+            var shengsheng = EnsureExternalBalanceProvider(
+                providers,
+                "shengsheng",
+                "https://yuanyuaicloud.cn",
+                "yuanyuan-window",
+                "/api/query-quota");
+            shengsheng["userId"] = shengshengUserId.Trim();
+            shengsheng["systemToken"] = shengshengToken.Trim();
+            shengsheng["displayName"] = NormalizeExternalBalanceDisplayName(shengshengDisplayName, "省省");
+
+            if (providerCount == 2)
+            {
+                var deepkey = EnsureExternalBalanceProvider(
+                    providers,
+                    "deepkey",
+                    "https://deepkey.top",
+                    "",
+                    "/api/status",
+                    "/api/user/self");
+                deepkey["userId"] = deepkeyUserId.Trim();
+                deepkey["systemToken"] = deepkeyToken.Trim();
+                deepkey["displayName"] = NormalizeExternalBalanceDisplayName(deepkeyDisplayName, "Deepkey");
+            }
+
+            File.WriteAllText(
+                _externalBalancesPath,
+                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
+                new UTF8Encoding(false));
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_editor_save_failed", new { error = ex.Message });
+        }
+    }
+
+    private static JsonObject EnsureExternalBalanceProvider(
+        JsonArray providers,
+        string id,
+        string baseUrl,
+        string kind,
+        params string[] endpoints)
+    {
+        foreach (var item in providers)
+        {
+            if (item is JsonObject provider && string.Equals((string?)provider["id"], id, StringComparison.OrdinalIgnoreCase))
+            {
+                return provider;
+            }
+        }
+
+        var endpointList = new JsonArray();
+        foreach (var endpoint in endpoints)
+        {
+            endpointList.Add(endpoint);
+        }
+
+        var created = new JsonObject
+        {
+            ["id"] = id,
+            ["baseUrl"] = baseUrl,
+            ["kind"] = kind,
+            ["displayName"] = id.Equals("shengsheng", StringComparison.OrdinalIgnoreCase) ? "省省" : "Deepkey",
+            ["userId"] = "",
+            ["systemToken"] = "",
+            ["endpoints"] = endpointList,
+        };
+        providers.Add(created);
+        return created;
+    }
+
+    private static string NormalizeExternalBalanceDisplayName(string? value, string fallback)
+    {
+        var normalized = (value ?? "").Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? fallback : normalized[..Math.Min(normalized.Length, 24)];
+    }
+
+    private async Task<ExternalBalanceSnapshot?> FetchExternalBalanceSnapshotAsync(ExternalBalanceProviderConfig provider)
+    {
+        if (string.Equals(provider.Kind, "yuanyuan-window", StringComparison.OrdinalIgnoreCase) ||
+            provider.BaseUrl.Contains("yuanyuaicloud.cn", StringComparison.OrdinalIgnoreCase))
+        {
+            return await FetchYuanyuanWindowQuotaSnapshotAsync(provider);
+        }
+
+        if (!string.IsNullOrWhiteSpace(provider.UserId))
+        {
+            return await FetchNewApiBalanceSnapshotAsync(provider);
+        }
+
+        foreach (var endpoint in provider.Endpoints)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, provider.BaseUrl + endpoint);
+                request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + provider.SystemToken);
+                request.Headers.TryAddWithoutValidation("Accept", "application/json");
+                request.Headers.TryAddWithoutValidation("Cache-Control", "no-store");
+                if (!string.IsNullOrWhiteSpace(provider.UserId))
+                {
+                    request.Headers.TryAddWithoutValidation("New-Api-User", provider.UserId);
+                }
+                using var response = await ExternalBalanceHttpClient.SendAsync(request);
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                {
+                    DebugLog("external_balance_unauthorized", new { provider = provider.Id, endpoint });
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                var content = await response.Content.ReadAsStringAsync();
+                if (string.IsNullOrWhiteSpace(content) || !content.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                using var doc = JsonDocument.Parse(content);
+                if (TryExtractBalanceText(doc.RootElement, out var balanceText))
+                {
+                    return new ExternalBalanceSnapshot(balanceText, null, ExtractCurrencyPrefix(balanceText), null);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog("external_balance_endpoint_failed", new { provider = provider.Id, endpoint, error = ex.Message });
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<ExternalBalanceSnapshot?> FetchYuanyuanWindowQuotaSnapshotAsync(ExternalBalanceProviderConfig provider)
+    {
+        try
+        {
+            var token = provider.SystemToken.Trim();
+            if (token.StartsWith("sk-", StringComparison.OrdinalIgnoreCase))
+            {
+                token = token[3..];
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, provider.BaseUrl + "/api/query-quota");
+            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            request.Headers.TryAddWithoutValidation("Cache-Control", "no-store");
+            using var response = await ExternalBalanceHttpClient.SendAsync(request);
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                DebugLog("external_balance_unauthorized", new { provider = provider.Id, endpoint = "/api/query-quota" });
+                return null;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                DebugLog("external_balance_http_failed", new { provider = provider.Id, endpoint = "/api/query-quota", status = (int)response.StatusCode });
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("success", out var successProp) &&
+                successProp.ValueKind == JsonValueKind.False)
+            {
+                var message = ReadString(root, "message");
+                return string.IsNullOrWhiteSpace(message)
+                    ? null
+                    : new ExternalBalanceSnapshot(message, null, "", null);
+            }
+
+            if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var windowRemain = ReadDoubleProperty(data, "windowRemain", fallback: double.NaN);
+            if (double.IsNaN(windowRemain))
+            {
+                return null;
+            }
+
+            var resetText = "";
+            var nextResetTime = ReadDoubleProperty(data, "nextResetTime", fallback: 0);
+            if (nextResetTime > 0)
+            {
+                resetText = DateTimeOffset.FromUnixTimeSeconds((long)nextResetTime)
+                    .ToLocalTime()
+                    .ToString("HH:mm", CultureInfo.InvariantCulture);
+            }
+
+            return new ExternalBalanceSnapshot(
+                "₸" + windowRemain.ToString(windowRemain >= 100 ? "#,0" : "0.##", CultureInfo.InvariantCulture),
+                windowRemain,
+                "₸",
+                resetText);
+        }
+        catch (TaskCanceledException)
+        {
+            DebugLog("external_balance_timeout", new { provider = provider.Id });
+            return null;
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_endpoint_failed", new { provider = provider.Id, endpoint = "/api/query-quota", error = ex.Message });
+            return null;
+        }
+    }
+
+    private async Task<ExternalBalanceSnapshot?> FetchNewApiBalanceSnapshotAsync(ExternalBalanceProviderConfig provider)
+    {
+        if (string.IsNullOrWhiteSpace(provider.UserId))
+        {
+            DebugLog("external_balance_config_failed", new { provider = provider.Id, error = "missing_user_id" });
+            return null;
+        }
+
+        try
+        {
+            var status = await FetchShengshengStatusAsync(provider.BaseUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, provider.BaseUrl + "/api/user/self");
+            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + provider.SystemToken);
+            request.Headers.TryAddWithoutValidation("New-Api-User", provider.UserId);
+            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            request.Headers.TryAddWithoutValidation("Cache-Control", "no-store");
+            using var response = await ExternalBalanceHttpClient.SendAsync(request);
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                DebugLog("external_balance_unauthorized", new { provider = provider.Id, endpoint = "/api/user/self" });
+                return null;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                DebugLog("external_balance_http_failed", new { provider = provider.Id, endpoint = "/api/user/self", status = (int)response.StatusCode });
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("success", out var successProp) &&
+                successProp.ValueKind == JsonValueKind.False)
+            {
+                var message = ReadString(root, "message");
+                return string.IsNullOrWhiteSpace(message)
+                    ? null
+                    : new ExternalBalanceSnapshot(message, null, "", null);
+            }
+
+            if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var quota = ReadDoubleProperty(data, "quota");
+            var commissionQuota = ReadDoubleProperty(data, "commission_quota");
+            var affQuota = ReadDoubleProperty(data, "aff_quota");
+            var remainQuota = quota + commissionQuota + affQuota;
+            return FormatExternalBalanceQuota(remainQuota, status);
+        }
+        catch (TaskCanceledException)
+        {
+            DebugLog("external_balance_timeout", new { provider = provider.Id });
+            return null;
+        }
+        catch (Exception ex)
+        {
+            DebugLog("external_balance_endpoint_failed", new { provider = provider.Id, endpoint = "/api/user/self", error = ex.Message });
+            return null;
+        }
+    }
+
+    private static async Task<ShengshengStatusConfig> FetchShengshengStatusAsync(string baseUrl)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/api/status");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("Cache-Control", "no-store");
+        using var response = await ExternalBalanceHttpClient.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        var content = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(content);
+        var data = doc.RootElement.TryGetProperty("data", out var dataElement)
+            ? dataElement
+            : doc.RootElement;
+
+        return new ShengshengStatusConfig(
+            ReadDoubleProperty(data, "quota_per_unit", fallback: 500000),
+            ReadString(data, "quota_display_type") ?? "TOKENS",
+            ReadDoubleProperty(data, "usd_exchange_rate", fallback: 7),
+            ReadString(data, "custom_currency_symbol") ?? "¤",
+            ReadDoubleProperty(data, "custom_currency_exchange_rate", fallback: 1));
+    }
+
+    private static ExternalBalanceSnapshot FormatExternalBalanceQuota(double quota, ShengshengStatusConfig status)
+    {
+        var quotaPerUnit = Math.Abs(status.QuotaPerUnit) < 0.000001 ? 1 : status.QuotaPerUnit;
+        var displayType = status.QuotaDisplayType.ToUpperInvariant();
+        if (displayType == "TOKENS")
+        {
+            return new ExternalBalanceSnapshot(quota.ToString("#,0", CultureInfo.InvariantCulture), quota, "", null);
+        }
+
+        var prefix = displayType switch
+        {
+            "USD" => "$",
+            "CNY" => "¥",
+            "CUSTOM" => status.CustomCurrencySymbol,
+            _ => ""
+        };
+        var multiplier = displayType switch
+        {
+            "CNY" => status.UsdExchangeRate,
+            "CUSTOM" => status.CustomCurrencyExchangeRate,
+            _ => 1.0
+        };
+        var amount = quota / quotaPerUnit * multiplier;
+        return new ExternalBalanceSnapshot(prefix + amount.ToString(amount >= 100 ? "#,0.##" : "0.##", CultureInfo.InvariantCulture), amount, prefix, null);
+    }
+
+    private static double ReadDoubleProperty(JsonElement element, string name, double fallback = 0)
+    {
+        return element.TryGetProperty(name, out var value) && TryReadDouble(value, out var result)
+            ? result
+            : fallback;
+    }
+
+    private static double? ReadNullableDoubleProperty(JsonElement element, string name)
+    {
+        return element.TryGetProperty(name, out var value) && TryReadDouble(value, out var result)
+            ? result
+            : null;
+    }
+
+    private static string ExtractCurrencyPrefix(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        var first = text.TrimStart()[0];
+        return char.IsDigit(first) || first == '-' || first == '+'
+            ? ""
+            : first.ToString();
+    }
+
+    private static bool TryExtractBalanceText(JsonElement element, out string balanceText)
+    {
+        balanceText = "";
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in new[] { "remain_quota", "remaining_quota", "balance", "amount", "credit", "quota", "money" })
+            {
+                if (element.TryGetProperty(name, out var value) && TryFormatBalanceValue(value, out balanceText))
+                {
+                    return true;
+                }
+            }
+
+            if (element.TryGetProperty("data", out var data) && TryExtractBalanceText(data, out balanceText))
+            {
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (TryExtractBalanceText(property.Value, out balanceText))
+                {
+                    return true;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (TryExtractBalanceText(item, out balanceText))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryFormatBalanceValue(JsonElement value, out string balanceText)
+    {
+        balanceText = "";
+        if (TryReadDouble(value, out var numeric))
+        {
+            balanceText = numeric switch
+            {
+                >= 1000 => numeric.ToString("#,0", CultureInfo.InvariantCulture),
+                >= 10 => numeric.ToString("0.#", CultureInfo.InvariantCulture),
+                _ => numeric.ToString("0.##", CultureInfo.InvariantCulture),
+            };
+            return true;
+        }
+
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            var text = value.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                balanceText = text.Trim();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? ReadString(JsonElement element, string name)
+    {
+        return element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
     }
 
     private void ToggleQuotaPinned()
@@ -4624,7 +6241,14 @@ public partial class MainWindow : Window
 
         var percent = Math.Clamp(remainingPercent.Value, 0, 100);
         var percentText = $"{percent:0.#}%";
-        arc.Data = CreateProgressArcGeometry(percent, QuotaRingSize, QuotaRingStroke);
+        var ringSize = QuotaRingSize;
+        var ringStroke = QuotaRingStroke;
+        if (arc.Tag is QuotaTooltipTargets targets)
+        {
+            ringSize = targets.RingSize;
+            ringStroke = targets.RingStroke;
+        }
+        arc.Data = CreateProgressArcGeometry(percent, ringSize, ringStroke);
         text.Text = _showQuotaPercentInRing ? percentText : resetText;
         SetQuotaRingTooltip(arc, text, _showQuotaPercentInRing ? resetText : percentText);
     }
@@ -4869,6 +6493,7 @@ public partial class MainWindow : Window
         card.ContentGrid.Visibility = isIdle ? Visibility.Collapsed : Visibility.Visible;
         card.QuotaPanel.Visibility = isIdle ? Visibility.Visible : Visibility.Collapsed;
         card.QuotaPinButton.Visibility = isIdle ? Visibility.Visible : Visibility.Collapsed;
+        card.QuotaResetButton.Visibility = isIdle ? Visibility.Visible : Visibility.Collapsed;
         UpdateQuotaPinVisual(card);
         if (isIdle)
         {
@@ -5766,6 +7391,34 @@ public partial class MainWindow : Window
         return brush;
     }
 
+    private static Brush CreateExternalBalancePlateBrush(StatusPalette palette)
+    {
+        var brush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1),
+        };
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(255, 8, 11, 18), 0.00));
+        brush.GradientStops.Add(new GradientStop(WithAlpha(palette.Accent, 178), 0.45));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(255, 5, 7, 12), 1.00));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static Brush CreateExternalBalancePlateRimBrush(StatusPalette palette)
+    {
+        var brush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1),
+        };
+        brush.GradientStops.Add(new GradientStop(WithAlpha(palette.Highlight, 132), 0.00));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(58, 235, 240, 252), 0.52));
+        brush.GradientStops.Add(new GradientStop(WithAlpha(palette.Accent, 104), 1.00));
+        brush.Freeze();
+        return brush;
+    }
+
     private static Brush CreateBadgeRimBrush(StatusPalette palette)
     {
         var brush = new LinearGradientBrush
@@ -6067,6 +7720,7 @@ public partial class MainWindow : Window
         public DateTime CompletedAt { get; set; }
         public DateTime LastEventAt { get; set; } = DateTime.UtcNow;
         public TimeSpan Duration { get; set; }
+        public bool ObservedLiveStart { get; set; }
         public TaskVisualStatus Status { get; set; } = TaskVisualStatus.Working;
         public bool WasUnread { get; set; }
         public DateTime? UnreadClearedAt { get; set; }
@@ -6120,7 +7774,35 @@ public partial class MainWindow : Window
 
     private readonly record struct RateLimitWindow(double UsedPercent, DateTime? ResetsAt);
 
-    private readonly record struct QuotaTooltipTargets(FrameworkElement Track, FrameworkElement Center);
+    private readonly record struct QuotaTooltipTargets(FrameworkElement Track, FrameworkElement Center, double RingSize, double RingStroke);
+
+    private sealed record ExternalBalanceProviderConfig(
+        string Id,
+        string BaseUrl,
+        string? Kind,
+        string SystemToken,
+        string? UserId,
+        IReadOnlyList<string> Endpoints,
+        double? BaselineAmount,
+        double? LastObservedAmount,
+        double? ConsumedAmount);
+
+    private sealed record ExternalBalanceEditorValues(
+        string ShengshengDisplayName,
+        string ShengshengUserId,
+        string ShengshengToken,
+        string DeepkeyDisplayName,
+        string DeepkeyUserId,
+        string DeepkeyToken);
+
+    private readonly record struct ExternalBalanceSnapshot(string DisplayText, double? Amount, string CurrencyPrefix, string? SecondaryText);
+
+    private sealed record ShengshengStatusConfig(
+        double QuotaPerUnit,
+        string QuotaDisplayType,
+        double UsdExchangeRate,
+        string CustomCurrencySymbol,
+        double CustomCurrencyExchangeRate);
 
     private sealed record CompletionSoundChoice(string Id, string DisplayNameZh, string DisplayNameEn, string RelativePath);
 
@@ -6187,7 +7869,7 @@ public partial class MainWindow : Window
 
     private sealed class TaskCard
     {
-        public TaskCard(Border root, Border surface, Border surfaceGlow, TranslateTransform translate, Canvas pixels, Border glass, Grid edgeHighlights, Border flash, Grid contentGrid, Grid quotaPanel, ShapePath weeklyQuotaArc, TextBlock weeklyQuotaText, ShapePath fiveHourQuotaArc, TextBlock fiveHourQuotaText, Border quotaPinButton, ShapePath quotaPinHead, ShapePath quotaPinNeedle, TextBlock title, TextBlock message, Border badge, TextBlock badgeText, Grid durationTrail, Border durationAura, Border durationCore, TextBlock duration, Border toggleButton)
+        public TaskCard(Border root, Border surface, Border surfaceGlow, TranslateTransform translate, Canvas pixels, Border glass, Grid edgeHighlights, Border flash, Grid contentGrid, Grid quotaPanel, ShapePath weeklyQuotaArc, TextBlock weeklyQuotaText, ShapePath fiveHourQuotaArc, TextBlock fiveHourQuotaText, TextBlock shengshengBalanceText, TextBlock shengshengBalanceArrowText, TextBlock shengshengBalanceDeltaText, TextBlock deepkeyBalanceText, TextBlock deepkeyBalanceArrowText, TextBlock deepkeyBalanceDeltaText, Border quotaPinButton, Border quotaResetButton, ShapePath quotaPinHead, ShapePath quotaPinNeedle, TextBlock title, TextBlock message, Border badge, TextBlock badgeText, Grid durationTrail, Border durationAura, Border durationCore, TextBlock duration, Border toggleButton)
         {
             Root = root;
             Surface = surface;
@@ -6203,7 +7885,14 @@ public partial class MainWindow : Window
             WeeklyQuotaText = weeklyQuotaText;
             FiveHourQuotaArc = fiveHourQuotaArc;
             FiveHourQuotaText = fiveHourQuotaText;
+            ShengshengBalanceText = shengshengBalanceText;
+            ShengshengBalanceArrowText = shengshengBalanceArrowText;
+            ShengshengBalanceDeltaText = shengshengBalanceDeltaText;
+            DeepkeyBalanceText = deepkeyBalanceText;
+            DeepkeyBalanceArrowText = deepkeyBalanceArrowText;
+            DeepkeyBalanceDeltaText = deepkeyBalanceDeltaText;
             QuotaPinButton = quotaPinButton;
+            QuotaResetButton = quotaResetButton;
             QuotaPinHead = quotaPinHead;
             QuotaPinNeedle = quotaPinNeedle;
             Title = title;
@@ -6231,7 +7920,14 @@ public partial class MainWindow : Window
         public TextBlock WeeklyQuotaText { get; }
         public ShapePath FiveHourQuotaArc { get; }
         public TextBlock FiveHourQuotaText { get; }
+        public TextBlock ShengshengBalanceText { get; }
+        public TextBlock ShengshengBalanceArrowText { get; }
+        public TextBlock ShengshengBalanceDeltaText { get; }
+        public TextBlock DeepkeyBalanceText { get; }
+        public TextBlock DeepkeyBalanceArrowText { get; }
+        public TextBlock DeepkeyBalanceDeltaText { get; }
         public Border QuotaPinButton { get; }
+        public Border QuotaResetButton { get; }
         public ShapePath QuotaPinHead { get; }
         public ShapePath QuotaPinNeedle { get; }
         public TextBlock Title { get; }

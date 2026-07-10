@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2
+
+- Release packages exclude local quota-provider IDs, access tokens, balances, and UI state.
+- Prepared the public Codexstar GitHub v1.2 release.
+
 ## 1.1
 
 - Added English UI toggle for task cards, menus, tooltips, and settings panels.
